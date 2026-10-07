@@ -182,6 +182,50 @@ export const INTERACT_BUFFER_TICKS = 12; // 200 ms
 /** Attack buffering: remembered before the fire cooldown expires. */
 export const ATTACK_BUFFER_TICKS = 6; // 100 ms
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ANALOGUE INPUT SHAPING (GDD §14, and §5.4's "drifting stick" edge case)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * These are device-side tuning: what counts as "the stick is being pushed", what counts as "the
+ * trigger is held", and how fast a stick turns the camera. They are separate from the
+ * gameplay-facing buffer constants above because they describe hardware, not forgiveness.
+ */
+
+/** Radial deadzone for the movement stick. Large, because drift here moves the character. */
+export const GAMEPAD_MOVE_DEADZONE = 0.15;
+
+/**
+ * Radial deadzone for the look stick.
+ *
+ * Smaller than the movement deadzone on purpose. Movement needs only to distinguish "pushed" from
+ * "not pushed", whereas aiming needs fine control near the centre of the stick — and a deadzone
+ * that eats the first 15% of a look stick makes small aiming corrections impossible. This is the
+ * asymmetry the DEV_LOG's Q3 flagged as a guess, so the two values are separate constants prepared
+ * to diverge the moment the preview disagrees.
+ */
+export const GAMEPAD_LOOK_DEADZONE = 0.12;
+
+/**
+ * Analogue trigger value below which the trigger counts as released.
+ *
+ * Real hardware rests under its own spring load and reports a small non-zero value; browsers do not
+ * normalise it. Without this, a controller sitting untouched on a desk reads as "aim held
+ * permanently".
+ */
+export const GAMEPAD_TRIGGER_REST = 0.06;
+
+/**
+ * Radians of camera rotation per pixel of mouse movement.
+ *
+ * An unvalidated guess, and the DEV_LOG's doubts table says so. It is a constant rather than a
+ * literal inside the input system so that the overlay can expose it as a live tunable — a value
+ * that must be *judged* should be adjustable while judging it.
+ */
+export const INPUT_LOOK_SENSITIVITY = 0.0022;
+
+/** How much slower a stick's pitch is than its yaw, so vertical look is not twitchy. */
+export const LOOK_PITCH_SENSITIVITY_SCALE = 0.7;
+
 /** Ledges within this vertical error of a failed jump snap to a ledge grab instead. */
 export const LEDGE_ASSIST_M = 0.3;
 

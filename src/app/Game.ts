@@ -38,8 +38,10 @@ import { createWorldCamera, sharedUniforms } from '../render/PS1Material';
 import { CharacterController } from '../gameplay/CharacterController';
 import { CharacterRig } from '../gameplay/CharacterRig';
 import { DebugOverlay, type OverlaySample } from './DebugOverlay';
-import { KeyboardSampler } from './KeyboardSampler';
+import { InputSystem, type InputSnapshot } from '../input/InputSystem';
+import { InputAction } from '../input/Bindings';
 import { CameraRig } from '../gameplay/CameraRig';
+import type { CameraModeTriggers } from '../core/math/camera';
 import { buildJungleLevel, type BuiltLevel, type LevelSummary } from '../world/LevelBuilder';
 
 /** Live performance counters, surfaced by the debug overlay. */
@@ -83,7 +85,16 @@ export class Game {
   /** The player, once a level exists. */
   private character: CharacterController | null = null;
   private rig: CharacterRig | null = null;
-  private input: KeyboardSampler | null = null;
+  private input: InputSystem | null = null;
+
+  /**
+   * This tick's input, produced once at the top of `simulateTick` and read by everything after it.
+   *
+   * Produced once because `beginTick` *consumes* the latches: calling it again within a tick would
+   * report no input at all, and calling it from two systems would give the second one nothing. One
+   * production per tick, one place to look when asking "what did the player press".
+   */
+  private snapshot: InputSnapshot | null = null;
   private overlay: DebugOverlay | null = null;
 
   /**
@@ -101,6 +112,22 @@ export class Game {
 
   /** The debug overlay's key handler, retained so it can be unbound on dispose. */
   private debugKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+
+  /**
+   * The action awaiting a keypress, while the developer is rebinding it.
+   *
+   * ─── A DELIBERATELY MINIMAL REBIND, AND WHY IT IS NOT THE SETTINGS SCREEN ──────────
+   * GDD §10.1 puts settings UI in Phase 5, and that screen will be built properly then: a list of
+   * actions, a conflict prompt, unbind buttons. What this is instead is the smallest thing that
+   * makes remapping *verifiable end to end* — press F3, press a key, reload the page, check that
+   * the new key still works.
+   *
+   * Without it, persistence would be proven only by unit tests that construct a fake `storage`.
+   * That proves the code paths agree with each other; it does not prove that a real browser wrote
+   * a real `localStorage` entry that a real page reload can read back. Those are different claims
+   * and only one of them is worth a milestone acceptance criterion.
+   */
+  private rebindCapture: InputAction | null = null;
 
   private accumulator = 0;
   private lastFrameTime = 0;
@@ -182,9 +209,9 @@ export class Game {
 
     this.rig = new CharacterRig(this.level.scene, this.level.clothTexture);
 
-    // The canvas is where pointer lock is requested, so the sampler needs it. Passing `window`
-    // for keys and the canvas for the lock is the whole of the input surface for this milestone.
-    this.input = new KeyboardSampler(window, this.renderer.domElement);
+    // The canvas is where pointer lock is requested, so the input system needs it. Passing
+    // `window` for keys and the canvas for the lock is the whole of the input surface.
+    this.input = new InputSystem(window, this.renderer.domElement);
 
     this.cameraRig = new CameraRig(physics);
     // Snap rather than ease into position: the character spawns at a fixed point and a camera that
@@ -233,13 +260,54 @@ export class Game {
         case 'Equal':
           this.overlay?.nudgeTunable('snapGrid', snapStep, 16, 640);
           break;
+        case 'F3':
+          // Begin a rebind of Jump, the action whose loss is most immediately obvious.
+          this.rebindCapture = InputAction.Jump;
+          break;
         default:
+          if (this.rebindCapture !== null) {
+            this.completeRebind(event.code);
+            event.preventDefault();
+            event.stopPropagation();
+          }
           return;
       }
       this.applyTunables();
     };
 
     window.addEventListener('keydown', this.debugKeyHandler, { capture: true });
+  }
+
+  /**
+   * Complete a rebind with the key the developer just pressed.
+   *
+   * ─── TWO HONEST LIMITATIONS, STATED RATHER THAN DISCOVERED ──────────────────────────
+   *  1. `stopPropagation` is called, but the `InputSystem` listens in the **bubble** phase on the
+   *     window while this handler runs in the **capture** phase, so the press that performs the
+   *     rebind also reaches the input system and may act on its *old* binding for one tick. That is
+   *     harmless for a developer binding — the next tick uses the new one — and it is not worth
+   *     restructuring the input path to avoid for a devtool.
+   *  2. The binding is always taken on the **keyboard**, never the gamepad. Capturing a pad button
+   *     needs a polling loop that watches for a fresh press, which is real work and belongs with
+   *     the settings screen that will need it.
+   *
+   * @param code - The `KeyboardEvent.code` of the key that finished the rebind.
+   */
+  private completeRebind(code: string): void {
+    const action = this.rebindCapture;
+    this.rebindCapture = null;
+    if (!action || !this.input) return;
+
+    const result = this.input.setBinding(action, { device: 'keyboard', code });
+
+    if (!result.ok) {
+      // Report refusals instead of swallowing them: a rebind that silently does nothing is
+      // indistinguishable from a rebind that failed to persist, and the two need different fixes.
+      console.info(`[JungleRelic] Rebind refused: ${result.detail}`);
+      return;
+    }
+
+    console.info(`[JungleRelic] ${action} bound to ${code} (saved; reload to confirm it persists)`);
   }
 
   /**
@@ -278,7 +346,7 @@ export class Game {
       FIXED_DT,
       report,
       this.character.lastEvents,
-      this.input.drainLookDelta(),
+      this.snapshot ? this.snapshot.look : { yawDelta: 0, pitchDelta: 0 },
       this.cameraModeTriggers(),
     );
 
@@ -306,8 +374,12 @@ export class Game {
    * a mode that narrows the FOV with nothing to shoot is a worse preview than no mode at all. It
    * is wired to the input binding and simply unreachable until the key exists.
    */
-  private cameraModeTriggers(): Partial<import('../core/math/camera').CameraModeTriggers> {
-    return {};
+  private cameraModeTriggers(): Partial<CameraModeTriggers> {
+    return {
+      // Aiming became answerable this milestone: the aim control is bound and sampled, so the FOV
+      // transition from 60 to 45 degrees is now a real behaviour rather than an unreachable branch.
+      aiming: this.snapshot?.aiming ?? false,
+    };
   }
 
   /**
@@ -346,6 +418,16 @@ export class Game {
       frameStats: this.pipeline.stats,
       character: this.character ? this.character.report : null,
       camera: this.cameraRig ? this.cameraRig.current : null,
+      rebindCapture: this.rebindCapture,
+      input: this.input
+        ? {
+            activeDevice: this.input.lastActiveDevice,
+            gamepadConnected: this.input.isGamepadConnected,
+            pointerLocked: this.input.isPointerLocked,
+            loadStatus: this.input.lastLoadStatus,
+            latency: this.input.consumeLatencySample(),
+          }
+        : null,
       rescues: this.character ? this.character.rescues : 0,
       lastRescueReason: this.character ? this.character.lastRescueReason : '',
     };
@@ -454,8 +536,16 @@ export class Game {
     // The controller reads its ground probe BEFORE the physics step, so it sees the world as
     // it was at the end of the previous tick. Stepping first would mean the character acted on
     // a world one tick ahead of the state its own position was computed against.
-    if (this.character && this.input) {
-      this.character.update(dt, this.input.sample());
+    // ─── ONE PRODUCTION PER TICK, AT THE TOP ─────────────────────────────────────────
+    // The look delta is camera-relative input, so the input system needs to know where the camera
+    // is pointing before it can turn a stick reading into a world direction. It is read from the
+    // rig's *reported* state rather than from the renderer, so the transform uses exactly the yaw
+    // the camera is actually on.
+    const cameraYaw = this.cameraRig ? this.cameraRig.current.yaw : 0;
+    this.snapshot = this.input ? this.input.beginTick(cameraYaw) : null;
+
+    if (this.character && this.snapshot) {
+      this.character.update(dt, this.snapshot.intent);
     }
 
     this.physics?.step();

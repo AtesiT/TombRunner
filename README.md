@@ -38,15 +38,25 @@ or in a container.
 |---|---|
 | **Click the canvas** | Capture the mouse. Camera look is ignored until you do. |
 | Mouse | Look. Left/right orbits, up/down pitches within −60°…+45° |
+| **Right mouse** | Aim — narrows the FOV from 60° to 45° and centres the shoulder offset |
 | `Esc` | Release the mouse |
-| `W` `A` `S` `D` | Move (the character turns toward the direction, so movement arcs) |
+| `W` `A` `S` `D` | Move, **relative to the camera** — W walks away from the camera, not north |
 | `Shift` | Run (6 m/s) instead of walk (2 m/s) |
 | `Space` | Jump — tap for a low hop, hold for the full height |
 | `Ctrl` / `C` | Crouch. **Crouch beats jump**: pressing both on a ledge edge will not launch you |
 | `E` | Interact |
+| `F` | Attack *(buffered; nothing consumes it until combat lands)* |
+| `Tab` | Inventory *(bound; no screen yet)* |
 | `F1` | Toggle the developer overlay |
+| `F3` | **Rebind Jump** — press `F3`, then any key. Saved to `localStorage`; reload to confirm |
 | `[` `]` | Tune affine texture warping, live |
 | `-` `=` | Tune the vertex snap grid, live |
+
+A **gamepad** works alongside the keyboard, on `standard`-mapping devices only. Left stick moves,
+right stick looks, A jumps, B crouches, X interacts, RT/RB attack, LT aims, Back opens the
+inventory. There is deliberately **no run button**: a stick's deflection *is* its speed, so pushing
+it halfway walks and pushing it fully runs. A non-standard pad is ignored rather than guessed at, and
+unplugging one mid-run falls back to the keyboard without your having to press anything.
 
 The character is a procedural rig built entirely in code — no model file, no skeleton, no
 animation clips. The gait actually advances by **distance travelled** rather than by time, which
@@ -72,6 +82,22 @@ Two of the camera's design decisions are worth knowing while playing:
   reliably distinguishes "idle" from "being steered" is a duration.
 * **Aiming narrows the FOV from 60° to 45° over about 0.18 s** and centres the shoulder offset.
   The transition is damped, never cut, so the horizon never jumps.
+
+Input is sampled **once per fixed tick**, never inside an event handler. Every handler does one of
+two things — sets a flag, or adds to a number — and all interpretation happens at tick start. That is
+what makes a 30 ms tap that begins and ends *between* two ticks survive to become a jump, which
+sounds like a detail and is in fact the difference between a platformer that feels broken
+intermittently and one that does not.
+
+The forgiveness windows the GDD asks for are counted in ticks, not milliseconds, so they cannot drift
+against simulated time: **150 ms for jump, 200 ms for interact, 100 ms for attack**. They deliberately
+do *not* stack with the character controller's own jump buffer — the input latch is consumed the
+moment it is delivered, so the two mechanisms compose as `max()` rather than adding up into a
+quarter-second of phantom jumps.
+
+The overlay reports the input device, whether the mouse is captured, how the bindings were loaded, and
+the measured event-to-tick latency, because those are the four things that make input look broken
+while being entirely correct.
 
 The overlay exists because appearance cannot be judged from a test suite. It reports frame time
 mean and p95, draw calls, triangle count, the full controller state, and live shader tunables —
@@ -120,7 +146,7 @@ This is an adventure, not a horror game.
 npm test
 ```
 
-Ten suites, 305 tests, all running headlessly in Node:
+Fifteen suites, 440 tests, all running headlessly in Node:
 
 | Suite | Covers | Count |
 |---|---|---:|
@@ -134,7 +160,12 @@ Ten suites, 305 tests, all running headlessly in Node:
 | `test/characterisation/shape-cast-semantics.test.ts` | Pins Rapier's swept-sphere semantics: radius honoured, direction normalised, `filterGroups` is the **9th** argument | 8 |
 | `test/unit/camera.test.ts` | Camera maths: frame-rate independence, the asymmetric spring arm, mode priority, the deadzone's continuity at its threshold | 83 |
 | `test/integration/camera-rig.test.ts` | Real Rapier: the **eight mandatory camera edge cases**, plus 30 Hz landing where 60 Hz lands | 24 |
-| **Total** | | **305** |
+| `test/unit/analog.test.ts` | Deadzone continuity, radial symmetry, trigger rest offsets, the camera-relative transform | 29 |
+| `test/unit/bindings.test.ts` | Conflict refusal, unbind rules, serialisation, and **twelve hostile stored payloads** | 39 |
+| `test/unit/input-system.test.ts` | The **five mandatory input edge cases**, the buffer design, remapping, device fallback | 58 |
+| `test/integration/input-latency.test.ts` | R6's budget: a press moves the character on the **same tick**, end to end through real Rapier | 6 |
+| `test/integration/input-camera-loop.test.ts` | The camera↔movement feedback loop converges instead of circling | 3 |
+| **Total** | | **440** |
 
 The jump distances the level design is authored against are asserted numerically: a standing
 jump clears **2.997 m** at a **2.000 m** peak, and a full-speed running jump clears **6.109 m**

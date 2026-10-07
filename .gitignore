@@ -8,6 +8,7 @@ dist-ssr/
 
 # Test / coverage artifacts
 coverage/
+.vitest/
 
 # Editor & OS
 .DS_Store

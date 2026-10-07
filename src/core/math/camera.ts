@@ -691,58 +691,6 @@ export function shouldForceCameraReset(
   return false;
 }
 
-/**
- * Apply a radial deadzone to a stick, rescaling the live region so there is no jump at the edge.
- *
- * ─── WHY THIS IS MATH AND NOT AN `if` ───────────────────────────────────────────────
- * The GDD calls this out as "a genuinely common reported bug in shipped games", and the reason is
- * that the obvious implementation is subtly wrong. Two failure modes:
- *
- *   1. **Per-axis deadzones** create a cross-shaped dead region, so pushing diagonally registers
- *      when pushing straight up does not. Players feel this as "the stick is broken in the
- *      corners" and cannot describe it.
- *   2. **A hard cutoff without rescaling** makes the output jump from 0 to `deadzone` the instant
- *      the stick crosses the threshold, which is a visible lurch and defeats the point of a soft
- *      region.
- *
- * This applies one radial deadzone and rescales the remaining range back to [0, 1], so the
- * response is continuous and reaches full magnitude at the stick's physical limit.
- *
- * @param x - Raw stick X in [-1, 1].
- * @param y - Raw stick Y in [-1, 1].
- * @param deadzone - The radial deadzone radius in [0, 1).
- * @returns The filtered stick, with magnitude 0 inside the deadzone and continuous beyond it.
- */
-export function applyRadialDeadzone(x: number, y: number, deadzone: number): { x: number; y: number } {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return { x: 0, y: 0 };
-
-  const magnitude = Math.hypot(x, y);
-  if (!Number.isFinite(deadzone) || deadzone <= 0) return { x, y };
-  // A deadzone at or beyond full deflection would make the stick permanently dead. Refusing to
-  // apply it is better than a controller that does nothing.
-  if (deadzone >= 1) return { x: 0, y: 0 };
-
-  if (magnitude <= deadzone) return { x: 0, y: 0 };
-
-  const rescaled = Math.min(1, (magnitude - deadzone) / (1 - deadzone));
-  return {
-    x: (x / magnitude) * rescaled,
-    y: (y / magnitude) * rescaled,
-  };
-}
-
-/**
- * The water mode's positional wobble.
- *
- * Deliberately tiny — the GDD asks for 0.05 rad, which is under three degrees — because its job
- * is to signal *submerged* at the edge of perception, not to make the player seasick.
- *
- * @param elapsedSeconds - Seconds since entering the water.
- * @param frequencyHz - Wobble frequency.
- * @param amplitudeRad - Peak angular deviation.
- * @param phase - Which of the two wobble axes to sample. 0 and π/2 give a circular motion.
- * @returns The angular offset in radians.
- */
 export function waterWobble(
   elapsedSeconds: number,
   frequencyHz: number,

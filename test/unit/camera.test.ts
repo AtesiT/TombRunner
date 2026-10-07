@@ -15,7 +15,6 @@ import { describe, it, expect } from 'vitest';
 import {
   advanceSpringArm,
   applyGroundClamp,
-  applyRadialDeadzone,
   CameraMode,
   clampPitch,
   damp,
@@ -37,6 +36,7 @@ import {
   wrapAngle,
   type CameraFraming,
 } from '../../src/core/math/camera';
+import { applyRadialDeadzone } from '../../src/core/math/analog';
 import {
   CAMERA_AIM_DISTANCE_M,
   CAMERA_AIM_FOV_DEG,

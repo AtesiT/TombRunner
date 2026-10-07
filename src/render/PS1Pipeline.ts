@@ -66,6 +66,29 @@ export interface FrameStats {
  * quad. One instance per game; it is explicitly disposable so that a canvas resize or
  * a device-loss recovery can rebuild the targets without leaking GPU memory.
  */
+/**
+ * A single oversized triangle covering the whole viewport in clip space.
+ *
+ * Three vertices instead of a quad's six, and — the reason it is a triangle rather than two
+ * triangles — no diagonal seam, which some rasterisers draw as a visible line across the screen.
+ * Positions are already in clip space, so the fullscreen vertex shader is a pure pass-through and
+ * the orthographic camera exists only to satisfy the render call.
+ *
+ * Deliberately a module-level function rather than a method: it reads nothing from the instance, and
+ * saying that in a signature is cheaper than saying it in a comment.
+ *
+ * @returns The geometry, ready to be drawn with either fullscreen material.
+ */
+function createFullscreenGeometry(): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3),
+  );
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2));
+  return geometry;
+}
+
 export class PS1Pipeline {
   /** Internal resolution. Mutable so the options menu can offer 320x240. */
   public internalWidth: number;
@@ -118,53 +141,21 @@ export class PS1Pipeline {
     this.internalHeight = options.height ?? RENDER_TARGET_HEIGHT;
 
     this.sceneTarget = this.createRenderTarget(this.internalWidth, this.internalHeight, 'SceneTarget');
-    this.paletteTarget = this.createRenderTarget(this.internalWidth, this.internalHeight, 'PaletteTarget');
+    this.paletteTarget = this.createRenderTarget(
+      this.internalWidth,
+      this.internalHeight,
+      'PaletteTarget',
+    );
 
-    // The Bayer table is uploaded once and never changes; a texture lookup is used
-    // instead of a GLSL const array because GLSL ES 1.00 does not support array
-    // constructors, and because it guarantees the shader's matrix is identical to the
-    // unit-tested TypeScript version.
+    // The Bayer table is uploaded once and never changes; a texture lookup is used instead of a
+    // GLSL const array because GLSL ES 1.00 does not support array constructors, and because it
+    // guarantees the shader's matrix is identical to the unit-tested TypeScript version.
     this.bayerTexture = buildBayerTexture();
     this.bayerTexture.needsUpdate = true;
 
-    // A single quad, drawn three times with different materials. Positions are in
-    // clip space already, so the fullscreen vertex shader is a pure pass-through and
-    // the orthographic camera is only there to satisfy the render call.
-    this.fullscreenGeometry = new THREE.BufferGeometry();
-    this.fullscreenGeometry.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3),
-    );
-    this.fullscreenGeometry.setAttribute(
-      'uv',
-      new THREE.Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2),
-    );
-    // A single oversized triangle covers the viewport with three vertices instead of
-    // six, and avoids the diagonal seam a two-triangle quad can show under some
-    // rasterisers.
-
-    this.paletteMaterial = new THREE.ShaderMaterial({
-      vertexShader: FULLSCREEN_VERTEX_SHADER,
-      fragmentShader: PALETTE_FRAGMENT_SHADER,
-      depthTest: false,
-      depthWrite: false,
-      uniforms: {
-        uSource: { value: this.sceneTarget.texture },
-        uDitherTable: { value: this.bayerTexture },
-        uPaletteLevels: { value: PALETTE_LEVELS },
-        uDitherAmount: { value: PALETTE_DITHER_ENABLED ? 1 : 0 },
-      },
-    });
-
-    this.blitMaterial = new THREE.ShaderMaterial({
-      vertexShader: FULLSCREEN_VERTEX_SHADER,
-      fragmentShader: BLIT_FRAGMENT_SHADER,
-      depthTest: false,
-      depthWrite: false,
-      uniforms: {
-        uSource: { value: this.paletteTarget.texture },
-      },
-    });
+    this.fullscreenGeometry = createFullscreenGeometry();
+    this.paletteMaterial = this.createPaletteMaterial();
+    this.blitMaterial = this.createBlitMaterial();
 
     this.fullscreenCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this.fullscreenScene = new THREE.Scene();
@@ -181,6 +172,41 @@ export class PS1Pipeline {
       presentedHeight: 0,
       scale: 1,
     };
+  }
+
+  /**
+   * The quantisation pass: the scene target in, a dithered and palette-reduced image out.
+   *
+   * Extracted from the constructor when the review protocol's 50-line rule caught the constructor at
+   * 51. The rule did its job — the constructor was doing three separable things (allocate, build the
+   * fullscreen pass, seed statistics) and only the split makes that visible.
+   */
+  private createPaletteMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      vertexShader: FULLSCREEN_VERTEX_SHADER,
+      fragmentShader: PALETTE_FRAGMENT_SHADER,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uSource: { value: this.sceneTarget.texture },
+        uDitherTable: { value: this.bayerTexture },
+        uPaletteLevels: { value: PALETTE_LEVELS },
+        uDitherAmount: { value: PALETTE_DITHER_ENABLED ? 1 : 0 },
+      },
+    });
+  }
+
+  /** The presentation pass: the quantised target scaled up to the canvas, nearest-neighbour. */
+  private createBlitMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      vertexShader: FULLSCREEN_VERTEX_SHADER,
+      fragmentShader: BLIT_FRAGMENT_SHADER,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uSource: { value: this.paletteTarget.texture },
+      },
+    });
   }
 
   /**

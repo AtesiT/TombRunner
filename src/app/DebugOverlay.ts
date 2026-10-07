@@ -33,6 +33,7 @@
 
 import type { CharacterTickReport } from '../gameplay/CharacterController';
 import type { CameraState } from '../gameplay/CameraRig';
+import type { InputAction } from '../input/Bindings';
 import type { FrameStats } from '../render/PS1Pipeline';
 
 /** Everything the overlay can display. Gathered by the caller and formatted here. */
@@ -55,6 +56,16 @@ export interface OverlaySample {
   lastRescueReason: string;
   /** The camera rig's state, or null before a camera exists. */
   camera: Readonly<CameraState> | null;
+  /** The action awaiting a keypress for a rebind, or null when not capturing. */
+  rebindCapture: InputAction | null;
+  /** The input layer's state, or null before input exists. */
+  input: {
+    activeDevice: 'keyboard' | 'gamepad';
+    gamepadConnected: boolean;
+    pointerLocked: boolean;
+    loadStatus: string;
+    latency: { eventToTickMs: number; action: string } | null;
+  } | null;
 }
 
 /** Live-editable values, so tuning happens by looking rather than by guessing. */
@@ -78,6 +89,7 @@ export class DebugOverlay {
   private readonly renderLine: HTMLDivElement;
   private readonly characterLine: HTMLDivElement;
   private readonly cameraLine: HTMLDivElement;
+  private readonly inputLine: HTMLDivElement;
   private readonly tuningLine: HTMLDivElement;
 
   private visible = false;
@@ -114,6 +126,7 @@ export class DebugOverlay {
     this.perfLine = document.createElement('div');
     this.renderLine = document.createElement('div');
     this.cameraLine = document.createElement('div');
+    this.inputLine = document.createElement('div');
     this.characterLine = document.createElement('div');
     this.tuningLine = document.createElement('div');
     this.tuningLine.style.cssText = 'color:#f0d8a0;margin-top:4px';
@@ -123,6 +136,7 @@ export class DebugOverlay {
       this.renderLine,
       this.characterLine,
       this.cameraLine,
+      this.inputLine,
       this.tuningLine,
     );
     parent.appendChild(this.root);
@@ -181,6 +195,7 @@ export class DebugOverlay {
     this.writeRender(sample.frameStats);
     this.writeCharacter(sample.character, sample.rescues, sample.lastRescueReason);
     this.writeCamera(sample.camera);
+    this.writeInput(sample.input, sample.rebindCapture);
     this.writeTuning();
   }
 
@@ -277,6 +292,47 @@ export class DebugOverlay {
       `yaw ${degrees(camera.yaw)}deg  pitch ${degrees(camera.pitch)}deg\n` +
       `idle ${camera.idleSeconds.toFixed(2)} s` +
       `${camera.resetting ? '   <-- stuck detector fired; this should be rare' : ''}`;
+  }
+
+  /**
+   * Write the input layer's state.
+   *
+   * ─── WHY THIS LINE EXISTS AT ALL ─────────────────────────────────────────────────────
+   * `RISK_ANALYSIS.md` R10.4 commits to "a dev overlay reports event-to-visible-frame latency",
+   * and R6 commits to a one-tick budget. A budget with no instrument is a wish, so the number is
+   * displayed next to the frame time where it can be compared against it directly.
+   *
+   * The device and lock fields are here because they are the two things that make input appear
+   * broken while being entirely correct: playing on a pad while the *keyboard* is the active device,
+   * and expecting mouse look while the pointer is not captured. Both are invisible without a readout
+   * and both are the first thing to check when the controls "stop working".
+   *
+   * @param input - The input layer's state, or null before input exists.
+   */
+  private writeInput(input: OverlaySample['input'], rebindCapture: InputAction | null): void {
+    if (!input) {
+      this.inputLine.textContent = 'input: none';
+      return;
+    }
+
+    // Capture mode is displayed rather than merely active, because a key capture that the player
+    // cannot see is indistinguishable from the game ignoring input — and the developer would be
+    // left pressing keys at a game that is waiting patiently for exactly that.
+    if (rebindCapture !== null) {
+      this.inputLine.textContent = `input: press any key to bind ${rebindCapture}  (Esc to cancel)`;
+      return;
+    }
+
+    const latency = input.latency
+      ? `   last press ${input.latency.action} -> ${input.latency.eventToTickMs.toFixed(1)} ms`
+      : '';
+
+    this.inputLine.textContent =
+      `input ${input.activeDevice}` +
+      `${input.gamepadConnected ? ' + gamepad' : ''}   ` +
+      `mouse ${input.pointerLocked ? 'captured' : 'FREE (click to capture)'}   ` +
+      `bindings ${input.loadStatus}${latency}\n` +
+      `F3 rebinds Jump (saved to localStorage; reload to confirm)`;
   }
 
   /** Write the live-tunable block. */

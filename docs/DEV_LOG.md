@@ -6,6 +6,345 @@
 
 ---
 
+## 2026-10-07 (commit 6) — Milestone 1.4: The Input Layer (IN PROGRESS)
+
+*Written before the code, per RULE #2.*
+
+### Scope
+
+The brief specifies: keyboard and mouse primary, gamepad secondary, input-level buffers of 150 ms
+(jump), 200 ms (interact) and 100 ms (attack), `localStorage` remapping, and five enumerated edge
+cases. It names three of the five — held jump must not auto-jump, gamepad disconnect fallback, and
+"rAF-based" — so I am specifying the remaining two myself and saying which they are rather than
+quietly padding the list to five.
+
+**This milestone also discharges two commitments made in Phase 0, which the brief does not restate:**
+
+| Source | Commitment | Why it belongs here |
+|---|---|---|
+| `RISK_ANALYSIS.md` R6 | "≤ 1 tick (16.7 ms) from input event to visible displacement, **asserted in an integration test** that measures input→transform-lag over a scripted input sequence" | This is the only milestone that can assert it. The claim is about the input path end-to-end, and after this commit the input path is a thing that exists |
+| `RISK_ANALYSIS.md` R10.4 | "a dev overlay reports event-to-visible-frame latency" | Same reason. A budget with no instrument is a wish |
+| `ARCHITECTURE.md` §6.2 | `input.beginTick()` in the fixed-step pseudocode; "Input edges latched per tick… `pressedThisTick` flags" | The loop pseudocode names the API. I am implementing the API it names, not inventing a different one |
+
+Three dead constants are already sitting in `constants.ts` — `INTERACT_BUFFER_TICKS = 12` and
+`ATTACK_BUFFER_TICKS = 6` are defined and referenced by nothing, and `JUMP_BUFFER_TICKS` is used
+only by the controller. I found this by grepping for usage rather than by reading the file, which is
+the habit that stopped me from "fixing" the jump constants last commit. This milestone makes two of
+them live and has to be deliberate about the third.
+
+### The five mandatory edge cases
+
+| # | Case | The failure it prevents |
+|---|---|---|
+| **IE1** | **A held jump must not auto-jump** | The brief names it and the GDD injects it as an enum value: `InputEdgeCases.HOLD_JUMP`. Holding jump re-requesting every tick means the player bounces continuously with no input beyond the first press |
+| **IE2** | **Gamepad disconnect mid-motion** | The brief names it. The pad is polled, not evented, so a vanished controller stops reporting *without* saying so — a stick held at the moment of disconnect latches forever and the character runs into a wall until the player presses a key. R10.3 additionally requires the fallback to be *seamless*, needing no keypress to recover control |
+| **IE3** | **Sampling is per-tick, never per-event** | The brief calls this "rAF-based". Acting inside a handler makes the response depend on how the browser batched events, and a press/release between two ticks is dropped entirely. `ARCHITECTURE.md` §6.2 states the rule: events latch, ticks interpret |
+| **IE4** | **Stick drift at rest** *(specified by me)* | GDD §5.4 lists it as "a genuinely common reported bug in shipped games": a stick resting off-centre rotates the camera or walks the character forever. The player cannot reproduce it and cannot describe it |
+| **IE5** | **Corrupt or unknown persisted bindings** *(specified by me)* | `localStorage` is player-writable and survives across versions. A binding table that trusts what it reads can be bricked permanently by one bad value — and the failure is on the *next load*, after the player has closed the game. GDD §10.4 already commits to "quarantine-and-fallback" for saves; input must meet the same bar |
+
+I chose IE4 and IE5 over the obvious alternatives ("both devices used at once" / "focus loss")
+because those two are *recoverable* when they go wrong — the player can press something and carry on
+— whereas both of mine produce a game that is unplayable and gives no clue why.
+
+### Additional edge cases I am handling anyway
+
+| Case | Handling |
+|---|---|
+| A keyup lost to alt-tab, leaving a key latched down forever | Clear on `blur` **and** `visibilitychange`; both, because a browser that fires one and not the other is a real configuration |
+| A press during a long hitch or a backgrounded tab | Latches carry a **tick deadline** and expire, so a press captured during a stall cannot fire seconds later (IE3's counterpart) |
+| `navigator.getGamepads()` returning a sparse array containing `null` | The array is scanned for the active index rather than indexed blindly; `null` holes are the documented shape of that API |
+| A non-`standard`-mapping pad | Accepted only when `mapping === 'standard'`, and ignored once with a warning otherwise. Guessing at an unlabelled layout is worse than declining it |
+| Triggers that report a small non-zero value at rest | Normalised with their own small deadzone, so a resting trigger does not read as "aim held" |
+| `requestPointerLock()` rejecting | Its promise is caught and reported once. An unhandled rejection is a console error, and "no console errors" is an acceptance criterion |
+| Mouse movement arriving while unlocked | Ignored, and the accumulator is dropped across the lock transition so acquiring the lock does not deliver the movement that acquired it |
+| Keyboard and gamepad both active | Buttons are the union of both; the movement axis takes the larger magnitude, so the keyboard cannot fight a stick mid-push |
+
+### Implementation decisions
+
+**1. The input buffers are latches drained on delivery, so the forgiveness windows take `max()`
+rather than `sum()`.**
+
+This is the decision most likely to be got wrong quietly. Both layers buffer jump: the input layer
+per the brief, and the controller's own state machine (Milestone 1.2, `JUMP_BUFFER_TICKS = 9`). If
+the input buffer re-asserts `jumpRequested` on every tick while it is open, a press is held for the
+input window *and then* for the controller's window, and the player gets up to ~300 ms of phantom
+jumps — a jump that fires when they pressed nothing recently. That reads as the game acting on its
+own.
+
+So the latch is **consumed by the read**: `beginTick()` hands the press over exactly once and clears
+it. The two mechanisms then do different jobs that compose instead of accumulating:
+
+- the **input latch** bridges the gap between input *events* and simulation *ticks*, so a tap that
+  begins and ends between two ticks is never lost;
+- the **controller's buffer** holds an already-delivered press until the game *permits* it — landing,
+  coyote time, cooldown.
+
+**2. Buffer windows are counted in ticks, not milliseconds.**
+
+Same reasoning as coyote time in Milestone 1.2. `JUMP_BUFFER_TICKS = 9`, `INTERACT_BUFFER_TICKS = 12`
+and `ATTACK_BUFFER_TICKS = 6` are already in `constants.ts` and are all exact at 60 Hz (150, 200 and
+100 ms). A millisecond window compared against `performance.now()` would drift against simulated
+time whenever the frame rate is not the tick rate.
+
+**3. Event handlers are O(1) accumulators with no logic, and all interpretation happens at
+`beginTick()`.**
+
+This is R10.1's commitment, made in Phase 0 and unimplemented until now. A handler that raycasts, or
+queries the DOM, or decides anything, delays the next frame *and* takes the input path out of the
+test harness. Handlers set bits and accumulate numbers; `beginTick()` interprets. The direct payoff
+is that the entire input path becomes testable by feeding synthetic event sequences — which is how
+the five edge cases above are tested, with no browser and no timers.
+
+**4. Edge detection belongs to the input layer, and the controller's duplicate is retained
+deliberately.**
+
+`CharacterController` currently re-derives its own interact edge
+(`intent.interactRequested && !this.interactLastTick`), because the previous adapter's edge
+detection was frame-local and the controller could not trust it. With a real input layer emitting
+one-shot edges, that guard is redundant.
+
+I am keeping it anyway, and the reason is a boundary argument rather than sentiment: `CharacterIntent`
+is a *public* interface that tests, AI and cutscenes all construct. A caller that passes
+`interactRequested: true` for a hundred ticks is violating the documented contract, and the guard
+costs one boolean while turning that violation from "the player grabs a ledge on every tick" into
+"nothing happens". It is documented as deliberate rather than left to be mistaken for dead code.
+
+**5. Movement becomes camera-relative, and the transform lives in the input layer.**
+
+`CharacterIntent.moveDirection` is documented as **world space**, and Milestone 1.1's note says the
+camera-relative transform "belongs in the input layer, not the controller, which is precisely why the
+controller takes a world-space direction and does not read the camera". With a camera now existing,
+"W moves north" is wrong: W must move away from the camera, which is what every third-person game
+since Mario 64 does and what the player's hands already expect.
+
+There is a feedback loop to check rather than assume: movement is derived from camera yaw, and
+auto-rotation drives camera yaw toward the character's facing, which is derived from movement. That
+loop is stable and has a fixed point — holding W settles with movement along camera-forward and the
+camera behind the character — and auto-rotation only engages after 0.5 s with no camera input, so it
+cannot fight a player who is actively steering. I will assert the fixed point in a test rather than
+reason about it in a comment.
+
+**6. Gamepad: polled exactly once per tick, standard mapping only, disconnect never requires a
+keypress.**
+
+R10.3's wording. Polling once per tick (rather than on `rAF`, which is a different cadence as soon as
+the frame rate differs from the tick rate) keeps gamepad edges on the same clock as everything else.
+`gamepadconnected`/`gamepaddisconnected` are used only to track *which index* is active — never to
+interpret input. Disconnect clears the pad state immediately, and a pad that vanishes between events
+(polled as `null`) is detected the same way, because a disconnect during a backgrounded tab may not
+fire the event at all.
+
+"Seamless" is a specific requirement and it has a specific shape: the system tracks the **last active
+source**, and a disconnect while that source was the pad falls back to keyboard/mouse *without* the
+player having to press anything to hand control back.
+
+**7. The radial deadzone moves to `core/math/analog.ts`, because it now has two consumers.**
+
+`applyRadialDeadzone` was written for the camera in Milestone 1.3 and is now also needed for the
+movement stick. Leaving it in `camera.ts` would make the input system import camera mathematics,
+which is the kind of dependency that looks harmless and is not. It moves to a neutral module that
+owns analogue-signal shaping, and `camera.ts` imports it from there — with the camera tests' import
+updated too, rather than left pointing at a re-export, so there remains exactly one place to look.
+
+**8. Remapping validates on load and rejects conflicts rather than resolving them silently.**
+
+The stored payload is versioned and every entry is checked against the known action and code
+vocabularies; anything unrecognised is dropped and the default is used. A remap that would leave an
+action with *no* binding is rejected outright, because a player who accidentally unbinds "forward"
+has no way to reach the settings screen to fix it. Assigning a key that is already taken is rejected
+with a reason rather than silently stealing it from the other action — a silent steal is how a player
+ends up unable to jump with no memory of having done anything.
+
+Storage being unavailable (private mode, quota, a throwing `localStorage`) degrades to session-only
+with a single warning, matching GDD §10.4's posture for saves.
+
+**9. Tests use a hand-rolled fake DOM rather than adding `jsdom`.**
+
+Buffer behaviour is entirely about *when* events arrive relative to ticks, and a synthetic
+`EventTarget` lets a test say "press and release inside one tick, then tick twice" exactly. A real
+DOM runs on real timers and would make these tests both slower and less precise, for a dependency.
+The fake is small enough to read in one sitting and it tests the same event-handler path the browser
+drives.
+
+### Explicitly not doing
+
+| Not doing | Why |
+|---|---|
+| A rebinding *screen* | GDD §10.1 puts settings UI in Phase 5. The system, the persistence and the conflict rules are the milestone; a UI that will be rebuilt is not. A minimal in-overlay rebind exists purely so the feature is verifiable end-to-end across a reload |
+| A sensitivity slider | Same. Sensitivity becomes a live tunable in the overlay, which is where it needs to be to be *judged* anyway |
+| Gamepad layouts beyond `standard` | Declining is honest; guessing is not. Logged as a limitation |
+| Rumble, touch, mobile | Mobile is declared out of scope in R11. Rumble is not in the GDD |
+| Input recording/replay | No requirement, and it would constrain the API for no current benefit |
+| Mouse acceleration or smoothing | R10.2: "player-imposed smoothing must be a choice, not a liberty taken on the player's behalf". Available as an off-by-default tunable, never on by default |
+
+### Doubts
+
+| # | Doubt | How it gets resolved |
+|---|---|---|
+| Q1 | Mouse sensitivity is still an unvalidated guess, and now it is *coupled* to the camera's mode transitions and the stick's look curve. Three guesses can fail together in a way that is hard to attribute | Feel, in the preview. The tunable exists so the value can be found by looking rather than argued |
+| Q2 | The look-smoothing tunable is off by default on R10.2's authority, but R10.2's reasoning is a *principle*, and I have not measured whether raw deltas are jittery with a real mouse | Measure in the preview: if raw is unusable, the default changes and the principle gets documented as having a cost |
+| Q3 | Deadzone 0.15 on both sticks is a single number for two different jobs — movement wants to ignore drift, the camera wants to ignore drift *and* retain fine aim control near centre. The camera may need a smaller one | Feel. Two constants, easy to split if the preview disagrees |
+| Q4 | "Last active source" is tracked by *any* input, including a stray mouse twitch while playing on a pad. If a pad disconnects moments after an accidental mouse movement, the fallback may believe the keyboard was already in charge — which is fine, but the *reverse* case is what worries me: a pad that was active and disconnects is only detectable by its absence | Play-test by unplugging a controller mid-run. Cannot be tested by feel until there is a controller to unplug, and I have not confirmed one is available |
+| Q5 | The attack buffer (100 ms) has no consumer until Milestone 2.1. It is implemented and tested at the input layer, but "it will be needed" is an assumption about a system that does not exist | Milestone 2.1, where it either fits or needs reshaping. Flagged now so a mismatch is not a surprise |
+| Q6 | Camera-relative movement changes how the character *turns*, and all of Milestone 1.2's measured turning behaviour was validated with world-space input | Re-measure the turn rate with camera-relative input. If the arc feels different, that is a real finding and belongs in the next entry |
+
+### What I Built
+
+**1. `src/core/math/analog.ts` — analogue signal shaping, moved out of the camera (29 tests).**
+
+`applyRadialDeadzone` was written for the camera in Milestone 1.3. This milestone needed the
+identical function for the movement stick, and at that point the input system would have had to
+import *camera* mathematics in order to filter a joystick. That dependency looks harmless and is not:
+it would make a change to the camera's look conventions silently change how the character walks. It
+moved to a neutral module with `normalizeTrigger`, `resolveMovement` and `stickToWorldDirection`
+alongside it, and `camera.ts` now *drops* it entirely rather than re-exporting — the file's stated
+virtue is having no dependencies, and a re-export would be a dependency wearing a disguise.
+
+**2. `src/input/Bindings.ts` — the action set, the default table, and hostile-input validation (39
+tests with the store).**
+
+Pure data in, pure data out. Remapping, conflict refusal, unbind rules, serialisation and — the part
+worth the effort — validation of a stored payload that may have been written by a different version,
+edited by hand, or left truncated by a crash.
+
+**3. `src/input/BindingStore.ts` — the `localStorage` boundary.**
+
+Deliberately its own file, and the only one that touches a browser API. Keeping it apart means the
+interesting logic is never behind a browser environment, and the impure part is small enough to audit
+in one pass. Storage is *injected* rather than reached for, so tests supply their own.
+
+**4. `src/input/InputSystem.ts` — devices in, intent out (58 tests).**
+
+Handlers that set flags. Polling once per tick. Tick-counted latches that are consumed on delivery.
+Pointer lock, mouse accumulation, gamepad deadzones and triggers, disconnect detection on two
+independent paths, and a latency instrument.
+
+**5. Integration, and the retirement of the adapter.**
+
+`KeyboardSampler.ts` is **deleted**. It was introduced in Milestone 1.2 as an explicitly temporary
+stand-in that declared its own shortcomings in a header comment — no buffers, no remapping, no
+gamepad, no mouse aim — and its removal is the milestone finishing what that comment promised.
+
+`Game.simulateTick` now produces **one snapshot per tick** at the top and hands it to everyone
+downstream. One production, because `beginTick` *consumes* the latches: calling it twice in a tick
+reports no input the second time, and calling it from two systems gives the second one nothing. It
+also now feeds the camera's `aiming` trigger, which makes the 60°→45° FOV transition a real behaviour
+rather than an unreachable branch.
+
+**6. Two Phase 0 commitments discharged.**
+
+| Source | Commitment | Where |
+|---|---|---|
+| R6 | "≤ 1 tick input→transform lag, **asserted in an integration test**" | `test/integration/input-latency.test.ts` (6 tests) |
+| R10.4 | "a dev overlay reports event-to-visible-frame latency" | The overlay's input line, next to the frame time it is compared against |
+
+**7. A minimal rebind in the overlay (`F3`).** Not the settings screen — that is Phase 5 — but enough
+that persistence is verifiable *end to end*: press `F3`, press a key, reload the page, confirm the new
+key still works. Without it, persistence would be proven only by unit tests that construct a fake
+storage, which proves the code paths agree with each other and does not prove that a real browser
+wrote a real entry a real reload can read back.
+
+### Problems Encountered
+
+**One real bug in the production code, and one in the test environment that was worse.** Both are
+the same shape: two halves of a system disagreeing about whether something *has* state.
+
+**B9 (production) — mouse buttons never entered the held set, so aiming with the right mouse button did nothing.**
+`onMouseDown` latched the press and stopped. Latching only produces *edges*, and `Aim` is a
+level-triggered action read through `isActionHeld` — which consults the held set that the handler
+never wrote to. The entire symptom was an FOV that never changed.
+
+The giveaway was an asymmetry I had written myself: `onMouseUp` *did* remove the code from the held
+set. A release that removes something a press never added is a contradiction, and the two handlers
+were sitting four lines apart. That is the argument for reading your own diffs as if they were
+somebody else's: the contradiction was visible on screen and I had looked straight past it while
+writing it.
+
+**B10 (test infrastructure) — the fake browser silently ran against the real `navigator`, so eleven
+gamepad tests were measuring nothing.** `globalThis.navigator` is an accessor with a getter and no setter on modern Node,
+so the fake's `globalThis.navigator = fake` threw in strict mode. I had wrapped the assignment in a
+`try`/`catch` and carried on — and the catch meant the tests silently ran against a navigator whose
+`getGamepads` is `undefined`. Every gamepad assertion passed a system that had never seen a gamepad.
+
+The failure count was the tell: 58 of 58 tests "failing" was plausible (a broken constructor), but
+once it dropped to five, the *pattern* was wrong — every gamepad test failing while every keyboard
+test passed is not what a broken input system looks like. `Object.defineProperty` replaces an
+accessor outright, and the fake now installs itself properly and *throws* rather than degrading if it
+cannot.
+
+This is the same class of error as the swallowed `try`/`catch` in general: **a `try`/`catch` around
+environment setup converts "the environment is wrong" into "the tests pass."** It is recorded in the
+process register below. It is also the second time in this project that a green suite has certified
+nothing (the first being the look-direction test that agreed with the bug in commit 5), and both
+times the fix was to make the wrong state *impossible to reach quietly* rather than to correct the
+symptom.
+
+**Test errors, recorded because a wrong test certifies its bug.** Three this time:
+
+| # | Error | Why it mattered |
+|---|---|---|
+| T6 | Asserted `normalizeTrigger(Infinity)` clamps to 1 | The module refuses it, and refusing is right: a trigger reporting Infinity is a broken device, and "held" is the one answer that leaves the player permanently aiming with no way to stop |
+| T7 | Expected a pad-press edge on the *second* tick it was visible | Edges derive from previous-tick state (R10.3), so they fire on the first. The test was asserting the opposite of the documented design |
+| T8 | Fired keys at the outer fake while the system listened to an inner one | Each `FakeDom` owns its own listener map. The assertion failed for a reason with nothing to do with the code under test — a hazard of hand-rolled fakes that is worth knowing about, and now commented at the site |
+
+Three persistence tests also failed for one shared reason: they pressed a key on a freshly-constructed
+system's *first* tick, which by design adopts no edges. That is the design working — a key held at
+construction must not fire — and it is worth noting that the failure mode my own tests hit first is
+the one the system was built to prevent.
+
+**Infrastructure note: the local git history was reset to `ac20e94` mid-milestone, and the working tree
+survived.** The sandbox rebuilt the checkout at the branch point and dropped the five commits that had
+been made since, leaving every file — including this milestone's — intact on disk but with nothing
+referring to it. It was recoverable in one command only because Milestone 1.3 had been **pushed**:
+`git update-ref refs/heads/arena/3a385e8d-tombrunner` pointed the branch back at `1e2cd6d` on the
+remote, and the working tree, which was never touched, then diffed as exactly this milestone's work.
+
+No code was lost and no work was redone, but the lesson is not "the sandbox is unreliable" — it is
+that **an unpushed commit is a local file**, and this project's only durable artefact is the remote.
+It is the same principle as the save-game design in GDD §10.3, where a crash mid-save must not destroy
+the previous save: the value of redundant storage is only ever visible on the day the primary fails.
+From here, the branch is pushed at the end of each milestone rather than at the end of each phase.
+
+### Alternatives Considered and Rejected
+
+| Alternative | Why rejected |
+|---|---|
+| `jsdom` for the input tests | Every edge case here is about *when* an event arrives relative to a tick. A synthetic target lets a test say exactly "press and release inside one tick" with no timers; jsdom would be slower, less precise, and a dependency to assert something the fake proves more directly |
+| Re-asserting the buffered press for its whole window | B: it would **add** to the controller's own buffer and produce ~300 ms of phantom jumps. Consume-on-delivery composes as `max()` |
+| Buffering windows in milliseconds | Drifts against simulated time whenever the frame rate differs from the tick rate — the exact coupling the fixed timestep exists to remove |
+| Interpreting input inside the event handlers | R10.1. It delays the frame *and* takes the input path out of the test harness |
+| Letting a new binding silently steal a conflicting key | How a player ends up unable to jump, with the settings screen showing the key they pressed attached to the action they changed — and no indication of which action lost it |
+| Accepting an action with no bindings | If the action is "forward" or "inventory", the player cannot reach the screen that would fix it |
+| Guessing at a non-standard gamepad layout | Declining is honest. A wrong guess produces controls that appear broken with no explanation the player could act on |
+| A gamepad "run" button | On a pad, speed is a continuous quantity with a continuous answer. A button would be a second, contradictory control over the same thing |
+| Smoothing or accelerating mouse look | R10.2: "player-imposed smoothing must be a choice, not a liberty taken on the player's behalf" |
+| Removing the controller's own interact edge | It is *documented as deliberate* instead: `CharacterIntent` is public and tests construct it, so a caller passing `interactRequested: true` for a hundred ticks is violating the contract, and the guard costs one boolean to turn that into "nothing happens" |
+| Polling the gamepad on `rAF` | R10.3 — `rAF` is a different cadence from the tick rate as soon as the frame rate differs, so the edges would disagree with everything else about how long a tick is |
+| A full settings screen | GDD §10.1 puts it in Phase 5. The system, the persistence and the conflict rules are this milestone |
+
+### Doubts
+
+| # | Doubt | How it gets resolved |
+|---|---|---|
+| Q1 | **Nothing has been rendered or played in six commits**, and this milestone changes how the character *moves* — camera-relative input alters steering, which Milestone 1.2 measured only with world-space input | Manual checklist. The fixed point of the camera loop is now proven numerically (deviation from a straight path < 0.25 m over 1.5 s), but whether 2 m/s walking *feels* right relative to a camera is not a number |
+| Q2 | Mouse sensitivity 0.0022 rad/px is still an unvalidated guess, and it is now shared between the mouse and the stick's look rate — so a bad value affects both devices consistently rather than one being tuned well | Feel. It is a named constant specifically so it can be changed once |
+| Q3 | The movement deadzone (0.15) and look deadzone (0.12) differ on principle — movement only needs to distinguish pushed from not-pushed, aiming needs fine control near centre — but both numbers are guesses, and the *principle* is mine rather than measured | Feel on a real pad, which I have not done. Flagged in doubt Q4 below as the larger problem |
+| Q4 | **Nothing here has been tested against a real gamepad.** The polling, deadzones, trigger normalisation and disconnect path are written against the documented `standard` mapping and tested against a fake that implements my reading of it. "My reading of the spec" is not a measurement | Play-test with a physical pad. Cannot be closed by any amount of code, and I have not confirmed one is available to the user |
+| Q5 | The rebind capture has a documented wart: this handler runs in the capture phase on `window` while the input system listens in the bubble phase, so the key that performs a rebind also reaches the input system and may act on the *old* binding for one tick | Harmless for a devtool and documented at the site rather than hidden. It would not be acceptable in the Phase 5 settings screen, where the same issue must be solved properly |
+| Q6 | The 0.25 m straight-line budget in the camera-loop test is a number I chose because it looked generous. It is not derived from a visual threshold | It is a regression detector rather than a spec. If the loop were diverging, the deviation would be metres, not centimetres |
+| Q7 | The attack buffer (100 ms) is implemented and tested but has no consumer until Milestone 2.1. "It will be needed" is an assumption about a system that does not exist | Milestone 2.1, where it either fits or needs reshaping. Its buffer length is the one I am least confident in, since it was written for a weapon that does not exist |
+
+### Next Steps
+
+1. **The manual checklist, and this is now the milestone's largest open risk.** Six commits of
+   unrendered work: W must walk away from the camera, right-click must narrow the FOV, the gamepad
+   path is untested against hardware, and `F3` must survive a reload. Every one of these is a
+   one-minute check and none of them is covered by 440 passing tests.
+2. **Milestone 2.1: combat**, the first system that consumes the attack buffer and the aim mode this
+   layer is buffering. It will also reveal whether the buffer lengths are right, which is the only
+   honest way to find out.
+
+
 ## 2026-10-07 (commit 5) — Milestone 1.3: The Camera Rig (IN PROGRESS)
 
 *Written before the code, per RULE #2. What I built, what broke, what I rejected and what I
