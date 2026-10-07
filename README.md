@@ -34,9 +34,28 @@ or in a container.
 
 ### Controls
 
-There is no player character yet. Milestone 1.1 renders the environment with a slowly
-orbiting preview camera so that the two most important visual effects — vertex wobble and
-affine texture warping — are visible in motion. A static camera would hide both.
+| Input | Action |
+|---|---|
+| `W` `A` `S` `D` | Move (the character turns toward the direction, so movement arcs) |
+| `Shift` | Run (6 m/s) instead of walk (2 m/s) |
+| `Space` | Jump — tap for a low hop, hold for the full height |
+| `Ctrl` / `C` | Crouch. **Crouch beats jump**: pressing both on a ledge edge will not launch you |
+| `E` | Interact |
+| `F1` | Toggle the developer overlay |
+| `[` `]` | Tune affine texture warping, live |
+| `-` `=` | Tune the vertex snap grid, live |
+
+The character is a procedural rig built entirely in code — no model file, no skeleton, no
+animation clips. The gait actually advances by **distance travelled** rather than by time, which
+is what stops the feet skating, and the slope lean is driven by the ground normal, so the
+character leans correctly into a 17° ramp no one authored a clip for.
+
+The camera here is a deliberate **placeholder** for Milestone 1.3's spring-arm rig. It follows
+behind and over the shoulder but does not yet raycast against geometry.
+
+The overlay exists because appearance cannot be judged from a test suite. It reports frame time
+mean and p95, draw calls, triangle count, the full controller state, and live shader tunables —
+and it costs nothing when hidden.
 
 ---
 

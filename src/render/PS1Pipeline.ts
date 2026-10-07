@@ -49,6 +49,16 @@ export interface FrameStats {
   presentedHeight: number;
   /** Integer scale factor applied during the blit. */
   scale: number;
+  /**
+   * Draw calls issued for the world pass.
+   *
+   * Read from the renderer rather than estimated. The Milestone 1.1 DEV_LOG records that the
+   * estimate was wrong by an order of magnitude (6 expected, 40-120 measured), which is exactly
+   * why risk R1 insists on measurement over arithmetic.
+   */
+  drawCalls: number;
+  /** Triangles submitted for the world pass. */
+  triangles: number;
 }
 
 /**
@@ -165,6 +175,8 @@ export class PS1Pipeline {
     this.lastStats = {
       internalWidth: this.internalWidth,
       internalHeight: this.internalHeight,
+      drawCalls: 0,
+      triangles: 0,
       presentedWidth: 0,
       presentedHeight: 0,
       scale: 1,
@@ -284,9 +296,13 @@ export class PS1Pipeline {
     const canvasHeight = this.lastCanvasHeight || 1;
 
     // ---- Pass 1: world into the low-resolution target ----
+    // `renderer.info` is reset by each `render()` call, so it is read immediately after the
+    // world pass to isolate the scene's cost from the two full-screen blits.
     renderer.setRenderTarget(this.sceneTarget);
     renderer.clear(true, true, true);
     renderer.render(scene, camera);
+    const drawCalls = renderer.info.render.calls;
+    const triangles = renderer.info.render.triangles;
 
     // ---- Pass 2: palette quantisation + dither ----
     this.fullscreenQuad.material = this.paletteMaterial;
@@ -324,6 +340,8 @@ export class PS1Pipeline {
     this.lastStats = {
       internalWidth: this.internalWidth,
       internalHeight: this.internalHeight,
+      drawCalls,
+      triangles,
       presentedWidth: rect.width,
       presentedHeight: rect.height,
       scale:

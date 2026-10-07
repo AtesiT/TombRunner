@@ -34,7 +34,11 @@ import {
 } from '../core/constants';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { PS1Pipeline } from '../render/PS1Pipeline';
-import { createWorldCamera } from '../render/PS1Material';
+import { createWorldCamera, sharedUniforms } from '../render/PS1Material';
+import { CharacterController } from '../gameplay/CharacterController';
+import { CharacterRig } from '../gameplay/CharacterRig';
+import { DebugOverlay, type OverlaySample } from './DebugOverlay';
+import { KeyboardSampler } from './KeyboardSampler';
 import { buildJungleLevel, type BuiltLevel, type LevelSummary } from '../world/LevelBuilder';
 
 /** Live performance counters, surfaced by the debug overlay. */
@@ -66,6 +70,37 @@ export class Game {
 
   /** Camera orbit state for the Milestone 1.1 preview. Replaced in Milestone 1.2. */
   private orbitAngle = 0;
+
+  /** The player, once a level exists. */
+  private character: CharacterController | null = null;
+  private rig: CharacterRig | null = null;
+  private input: KeyboardSampler | null = null;
+  private overlay: DebugOverlay | null = null;
+
+  /**
+   * Live shader tunables, shared by reference with the overlay so a nudge applies on the very
+   * next frame with no rebuild. This is what turns "is warpAmount 0.65 right?" from a guess
+   * into a value that can be found by looking.
+   */
+  private readonly tunables = {
+    warpAmount: sharedUniforms.uWarpAmount.value as number,
+    // `uSnapGrid` is a Vec2 of (columns, rows) because the snap grid must be matched to the
+    // render target's aspect. Only the row count is exposed: the column count is derived from
+    // it and the target resolution in the pipeline, so tuning rows alone keeps the grid square.
+    snapGrid: (sharedUniforms.uSnapGrid.value as THREE.Vector2).y,
+  };
+
+  /** Camera height above the player's body origin, in metres. */
+  private static readonly CAMERA_HEIGHT_M = 2.2;
+
+  /** Camera distance behind the player, in metres. */
+  private static readonly CAMERA_BACK_M = 4.2;
+
+  /** Over-the-shoulder lateral offset, per the GDD's 0.5 m spec. */
+  private static readonly SHOULDER_OFFSET_M = 0.5;
+
+  /** The debug overlay's key handler, retained so it can be unbound on dispose. */
+  private debugKeyHandler: ((event: KeyboardEvent) => void) | null = null;
 
   private accumulator = 0;
   private lastFrameTime = 0;
@@ -135,11 +170,135 @@ export class Game {
     // permanent physics failure into an immediate, loud one.
     physics.primeAndVerify({ x: spawn.x, y: spawn.y + 8, z: spawn.z });
 
-    // Position the preview camera to overlook the temple approach.
-    this.worldCamera.position.set(spawn.x, spawn.y + 3.4, spawn.z + 9);
-    this.worldCamera.lookAt(0, 1.5, -20);
+    // ── The player ─────────────────────────────────────────────────────────────
+    // Created AFTER the prime step, because a character whose controller queries an unprimed
+    // world is corrupted permanently and silently (Phase 0, Q2). The spawn is raised slightly
+    // so the first tick is a short settle rather than a resolved overlap.
+    this.character = new CharacterController(physics, {
+      x: spawn.x,
+      y: spawn.y + 0.5,
+      z: spawn.z,
+    });
+
+    this.rig = new CharacterRig(this.level.scene, this.level.clothTexture);
+
+    this.input = new KeyboardSampler(window);
+
+    // The overlay is created last so its constructor cannot be blamed for a boot failure in
+    // the character or the rig.
+    this.overlay = new DebugOverlay(document.body, this.tunables);
+    this.installDebugKeyBindings();
+
+    // Position the camera behind the player, facing the temple approach.
+    this.worldCamera.position.set(spawn.x, spawn.y + 2.2, spawn.z + 5);
+    this.worldCamera.lookAt(spawn.x, spawn.y + 1.2, spawn.z - 6);
 
     return this.level.summary;
+  }
+
+  /**
+   * Install the overlay's key bindings.
+   *
+   * Bound with `capture: true` and prevented from reaching the document so that the browser's
+   * own Ctrl-based shortcuts cannot fire while the developer is tuning — pressing Ctrl to
+   * crouch should not be interpreted as a browser command.
+   *
+   * @returns Nothing. Binding is a side effect; unbinding happens in {@link dispose}.
+   */
+  private installDebugKeyBindings(): void {
+    const warpStep = 0.05;
+    const snapStep = 8;
+
+    this.debugKeyHandler = (event: KeyboardEvent): void => {
+      switch (event.code) {
+        case 'F1':
+          this.overlay?.toggle();
+          event.preventDefault();
+          break;
+        case 'BracketLeft':
+          this.overlay?.nudgeTunable('warpAmount', -warpStep, 0, 1);
+          break;
+        case 'BracketRight':
+          this.overlay?.nudgeTunable('warpAmount', warpStep, 0, 1);
+          break;
+        case 'Minus':
+          this.overlay?.nudgeTunable('snapGrid', -snapStep, 16, 640);
+          break;
+        case 'Equal':
+          this.overlay?.nudgeTunable('snapGrid', snapStep, 16, 640);
+          break;
+        default:
+          return;
+      }
+      this.applyTunables();
+    };
+
+    window.addEventListener('keydown', this.debugKeyHandler, { capture: true });
+  }
+
+  /**
+   * Push the live tunables into the shared shader uniforms.
+   *
+   * Mutating the shared uniform objects updates every material that references them, so a
+   * change here costs nothing and needs no recompile.
+   */
+  private applyTunables(): void {
+    (sharedUniforms.uWarpAmount.value as number) = this.tunables.warpAmount;
+
+    const snapGrid = sharedUniforms.uSnapGrid.value as THREE.Vector2;
+    snapGrid.y = this.tunables.snapGrid;
+    // Keep the grid square in internal-target space: a grid that is not square in proportion to
+    // the target makes the snap wobble further horizontally than vertically, which reads as the
+    // image shearing rather than wobbling.
+    snapGrid.x = Math.round(this.tunables.snapGrid * (this.pipeline.internalWidth / this.pipeline.internalHeight));
+  }
+
+  /**
+   * Place the camera behind and above the player, offset to the right for the over-shoulder
+   * framing the GDD specifies.
+   *
+   * This is a **placeholder** for the real spring-arm rig in Milestone 1.3, which adds the
+   * spring arm, the obstacle raycast, the minimum distance clamp, the follow and auto-rotate
+   * lerps and the aim FOV transition. It exists now only so the character can be watched while
+   * moving, and it deliberately does not attempt any of that rig's behaviour.
+   */
+  private updateFollowCamera(): void {
+    if (!this.character) return;
+
+    const report = this.character.report;
+    const facing = report.facingAngle;
+
+    // 0.5 m to the character's right, per the GDD's over-shoulder spec.
+    const rightX = Math.cos(facing);
+    const rightZ = -Math.sin(facing);
+    const backX = -Math.sin(facing);
+    const backZ = -Math.cos(facing);
+
+    const cameraY = report.position.y + Game.CAMERA_HEIGHT_M;
+    this.worldCamera.position.set(
+      report.position.x + backX * Game.CAMERA_BACK_M + rightX * Game.SHOULDER_OFFSET_M,
+      cameraY,
+      report.position.z + backZ * Game.CAMERA_BACK_M + rightZ * Game.SHOULDER_OFFSET_M,
+    );
+    this.worldCamera.lookAt(report.position.x, report.position.y + 0.4, report.position.z);
+  }
+
+  /**
+   * Gather the overlay's sample from the live systems.
+   *
+   * @returns The sample, or a zeroed one before the character exists.
+   */
+  private buildOverlaySample(): OverlaySample {
+    return {
+      fps: this.currentFps,
+      frameTimeP95Ms: this.percentileFrameTime(0.95),
+      frameTimeMeanMs: this.meanFrameTime(),
+      ticksPerSecond: this.ticksPerSecond,
+      frameStats: this.pipeline.stats,
+      character: this.character ? this.character.report : null,
+      rescues: this.character ? this.character.rescues : 0,
+      lastRescueReason: this.character ? this.character.lastRescueReason : '',
+    };
   }
 
   /** The loaded scene, or null before {@link loadLevel}. */
@@ -242,7 +401,13 @@ export class Game {
    *   system cannot accidentally read a real-time delta and reintroduce non-determinism.
    */
   private simulateTick(dt: number): void {
-    void dt;
+    // The controller reads its ground probe BEFORE the physics step, so it sees the world as
+    // it was at the end of the previous tick. Stepping first would mean the character acted on
+    // a world one tick ahead of the state its own position was computed against.
+    if (this.character && this.input) {
+      this.character.update(dt, this.input.sample());
+    }
+
     this.physics?.step();
   }
 
@@ -258,17 +423,28 @@ export class Game {
 
     void alpha;
 
-    // Milestone 1.1 preview: orbit the camera slowly around the scene so the PS1
-    // artefacts (vertex wobble, affine warping) are visible in motion. A static camera
-    // hides the two most important things this milestone exists to demonstrate.
-    this.orbitAngle += 0.0016;
-    const orbitRadius = 30;
-    this.worldCamera.position.set(
-      Math.sin(this.orbitAngle) * orbitRadius,
-      9.5,
-      Math.cos(this.orbitAngle) * orbitRadius + 6,
-    );
-    this.worldCamera.lookAt(0, 2.2, -22);
+    if (this.character && this.rig) {
+      this.updateFollowCamera();
+      this.rig.update(
+        this.character.report,
+        FIXED_DT,
+        // No per-foot ground raycasts yet: proper foot IK belongs with the animation pass.
+        // Passing nulls means the IK is skipped rather than fed fabricated numbers.
+        { left: null, right: null },
+      );
+      this.overlay?.update(this.buildOverlaySample(), FIXED_DT);
+    } else {
+      // No character yet: orbit the scene so the PS1 artefacts (vertex wobble, affine
+      // warping) remain visible in motion, which a static camera would hide.
+      this.orbitAngle += 0.0016;
+      const orbitRadius = 30;
+      this.worldCamera.position.set(
+        Math.sin(this.orbitAngle) * orbitRadius,
+        9.5,
+        Math.cos(this.orbitAngle) * orbitRadius + 6,
+      );
+      this.worldCamera.lookAt(0, 2.2, -22);
+    }
 
     // Keep the sky dome centred on the camera so it reads as infinitely distant.
     this.level.updateSky(this.worldCamera.position);
@@ -300,10 +476,30 @@ export class Game {
    * @returns The 99th-percentile frame time in milliseconds.
    */
   private computeP99FrameTime(): number {
+    return this.percentileFrameTime(0.99);
+  }
+
+  /**
+   * Compute a percentile frame time from the rolling buffer.
+   *
+   * @param fraction - The percentile as a fraction, e.g. 0.95 for p95.
+   * @returns The frame time at that percentile, in milliseconds, or 0 with no samples.
+   */
+  private percentileFrameTime(fraction: number): number {
     if (this.frameTimes.length === 0) return 0;
     const sorted = [...this.frameTimes].sort((a, b) => a - b);
-    const index = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99));
+    const index = Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * fraction)));
     return sorted[index];
+  }
+
+  /**
+   * Mean frame time from the rolling buffer.
+   *
+   * @returns The mean in milliseconds, or 0 with no samples.
+   */
+  private meanFrameTime(): number {
+    if (this.frameTimes.length === 0) return 0;
+    return this.frameTimes.reduce((sum, value) => sum + value, 0) / this.frameTimes.length;
   }
 
   /** Current performance counters. */
@@ -343,6 +539,22 @@ export class Game {
    */
   public dispose(): void {
     this.stop();
+
+    // Every one of these owns a resource that would outlive the game object otherwise: DOM
+    // nodes, window listeners, geometry and materials. Leaking any of them makes a hot reload
+    // accumulate duplicates, which then all run on the same input.
+    if (this.debugKeyHandler) {
+      window.removeEventListener('keydown', this.debugKeyHandler, { capture: true });
+      this.debugKeyHandler = null;
+    }
+    this.overlay?.dispose();
+    this.overlay = null;
+    this.input?.dispose();
+    this.input = null;
+    this.rig?.dispose();
+    this.rig = null;
+    this.character = null;
+
     this.level?.dispose();
     this.level = null;
 

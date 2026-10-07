@@ -87,6 +87,15 @@ export interface BuiltLevel {
   scene: THREE.Scene;
   summary: LevelSummary;
   /**
+   * The woven-cloth texture, shared with the character rig.
+   *
+   * Exposed rather than recreated so the character passes through exactly the same PS1 shader
+   * path as the environment. It is owned by the level, so the rig must NOT dispose it — it
+   * would be disposed twice, and the second disposal would be a no-op that silently leaves a
+   * dangling reference in any material still using it.
+   */
+  clothTexture: THREE.Texture;
+  /**
    * Keep the sky dome centred on the camera.
    *
    * @param cameraPosition - The world camera's current position.
@@ -214,6 +223,7 @@ export function buildJungleLevel(physics: PhysicsWorld): BuiltLevel {
   return {
     scene,
     summary: context.summary,
+    clothTexture: context.textures.cloth,
     updateSky(cameraPosition: THREE.Vector3): void {
       // Moving the dome with the camera is what makes it read as infinitely distant
       // rather than as a nearby sphere the player can walk towards.

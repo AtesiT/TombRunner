@@ -6,6 +6,229 @@
 
 ---
 
+## 2026-10-07 (commit 4) — Milestone 1.2: Procedural Rig, Dev Overlay, and a Playable Preview
+
+**Milestone 1.2 is complete.** The character is now visible, driveable and instrumented in the
+live preview.
+
+### What I Built
+
+**`src/gameplay/CharacterRig.ts` — a procedural character, zero binary assets**
+
+The rig is thirteen primitives assembled at boot and animated by evaluating pose functions,
+because the project ships no `.glb`, no skeleton and no clips — and because there is no DCC tool
+in this environment, so a rig that cannot be authored also cannot be maintained.
+
+A conventional blend tree interpolates between *clips*; without clips the equivalent is to
+interpolate between *functions that write a pose*. Two things fall out of this that a clip-based
+system cannot give for free:
+
+- **Transitions are free and correct.** Walk-to-run is a weight change, not a scheduled
+  crossfade. There is no blend duration to tune and no pop when a transition is interrupted.
+- **The pose continuously reflects the world.** The slope lean is a function of the ground
+  normal, so the character leans into a 17° ramp that nobody authored a clip for.
+
+Details worth recording: the gait phase advances with **distance travelled, not time**, which is
+what stops the feet skating; knee bend is gated to the back-swing so the legs do not scissor; arms
+counter-swing the legs, which is what sells a walk from any angle; and the model's feet are
+placed `halfHeight + radius` below the capsule *centre* (the constant is derived, not a literal,
+so it cannot drift out of step with the collision shape).
+
+**`src/app/DebugOverlay.ts` — a production overlay, not a debug hack**
+
+F1 toggles it; `[`/`]` tune affine warping and `-`/`=` tune the vertex snap grid, live, through
+the shared uniform objects so a change costs nothing and needs no recompile.
+
+This exists because three Milestone 1.1 questions are genuinely unanswerable in a sandbox: *is
+`warpAmount = 0.65` right? is the snap grid too aggressive? does the scene read as lush jungle?*
+They are judgements about appearance, and the overlay cannot make them — but it removes every
+*numerical* uncertainty around them, so the remaining decision is about taste, which is the part a
+human should be making anyway. It is also the instrument panel for this milestone's own doubts:
+the turn rate, steer weight and coyote/buffer windows are all visible while playing, so "feels
+unresponsive" becomes "the turn rate is 220°/s and that is too slow" at a glance.
+
+Two decisions worth noting. It is **DOM, not WebGL**: drawing it through the PS1 pipeline would
+quantise the text to the 480×270 palette and make the numbers unreadable, and would make the
+overlay part of the thing it measures. And it **costs nothing when hidden**: one boolean test per
+frame, with DOM writes at 4 Hz rather than 60, because `textContent` writes force layout and doing
+that every frame is measurable.
+
+Also added: `FrameStats.drawCalls` and `triangles`, read from the renderer rather than estimated.
+The Milestone 1.1 log records that the draw-call *estimate* was wrong by an order of magnitude,
+which is precisely why R1 insists on measurement.
+
+**`src/world/textures.ts` — a cloth texture**
+
+Near-flat by design, and starting from neutral grey rather than a colour so the per-part vertex
+colour supplies the hue. One texture therefore serves a shirt, trousers and boots without tinting
+any of them wrongly. Its real job is to keep the character subject to the same affine warping,
+vertex snapping and palette quantisation as the environment: a character on a plain white texture
+among quantised geometry looks pasted on top of the scene.
+
+**`src/app/KeyboardSampler.ts` — and an honest statement of what it is not**
+
+This is a **temporary adapter, not Milestone 1.4's input system**. It has no remapping, no
+gamepad, no mouse aim, no input-level buffers and no deadzone handling. It exists for one reason: a
+controller that cannot be driven cannot be verified, by test or by eye, and the brief's own
+acceptance criteria require a playable character.
+
+The file says all of this in its header, and the deferral is recorded here rather than left for a
+reader to discover. Milestone 1.4 must replace it *and* own the two things it deliberately
+fakes: press-edge detection (it samples physical key state once per tick, so holding jump reports
+`jumpRequested` every tick, which is harmless only because the controller's buffer and cooldown
+make a held jump fire once — that is accidental, not designed) and the camera-relative
+transformation of stick input, which does not exist yet because there is no camera rig until 1.3.
+
+It does handle one real edge case properly: **clearing all held keys on window blur.** Without it,
+alt-tabbing while running leaves the key stuck in the held set forever and the character walks off
+on its own when the player returns.
+
+### Problems
+
+**Q1 — several scripted edits silently failed to apply, twice, in one session.**
+
+Two separate patches — the platform-momentum inheritance (P8) and the `torso.position.y` lift —
+reported success while matching nothing, because the search strings had the wrong indentation and
+the edit was unasserted. The first was caught only because a test measured the character's actual
+position; the second was caught by a grep for a magic number that should no longer have been
+there.
+
+The rule adopted from here on: **every scripted edit asserts that it matched.** A patch that
+silently does nothing is worse than one that fails loudly, because the code then reads as though
+the feature exists.
+
+**Q2 — a texture is mandatory, and that was the right call to discover late.**
+
+`createPS1Material` requires a `map` and its documentation says untextured surfaces break the
+aesthetic. My first rig passed `map: null`, which failed typecheck. The temptation was to relax the
+type; the correct answer was that the constraint was right — a character on a white texture would
+not receive the affine warping and quantisation the environment has. So a cloth texture was added
+instead, starting from neutral grey so vertex colours still supply the hue.
+
+**Q3 — six bugs in `CharacterRig` found by review before it ever ran.**
+
+Worth listing because each is a distinct failure mode:
+
+1. A **stray non-English word** in a comment, from a slip in generation. Caught by reading.
+2. A **dead aliasing statement** (`void mergeGeometries;`) — the exact anti-pattern already
+   rejected in Milestone 1.1. Removing the import is the fix; the "unused import guard" idiom is
+   banned in this codebase.
+3. **Swapped `width`/`height`/`depth`** between the public `box()` helper and the private
+   `ownedBox()`. Every part would have been built with the wrong axis.
+4. `buildLimb` passed `(length, radius, radius)` into a `(width, height, depth)` helper, producing
+   limbs `length` wide and `radius` tall — visible as a character made of flat plates.
+5. A **shared material with per-part colours applied to the geometry** would have been fine, but
+   `restRotation` was declared and never read, and `restPosition` was captured before the geometry
+   shift, which is only correct because the shift is applied to the geometry rather than the mesh.
+   Recorded so the subtlety is not lost.
+6. A **`size_of_thread` identifier** in the texture generator — a value-named count, violating the
+   review rule on unclear names. Renamed `CLOTH_THREAD_COUNT`.
+
+**Q4 — `uSnapGrid` is a `Vector2`, not a number.**
+
+Caught by typecheck. The uniform holds `(columns, rows)` because the grid must be square *in
+internal-target space*, not in raw pixel counts. Exposing only the row count keeps the grid square
+by construction: the column count is derived from it and the target aspect. A grid that is not
+square in proportion to the target makes the snap wobble further horizontally than vertically,
+which reads as the image shearing rather than wobbling.
+
+**Q5 — `update()` was 101 lines, `mergeGeometries` 70, `probe()` 64, `buildRig()` 108.**
+
+The review protocol requires functions under 50 lines. My first measurement tool counted leading
+doc comments as body, which reported fifteen violations; a corrected tool that counts only
+non-comment body lines reported four. All four were decomposed into named phases —
+`update()` into `readGroundProbe` / `updatePlatformVelocity` / `sampleInputWindows` /
+`isJumpWindowOpen` / `buildContext` / `advanceState` / `projectInheritedVelocity` /
+`integrateForState` / `applyMovement` / `resolveVerticalCollision`.
+
+`update()` is now legible as the tick's *shape* rather than its mechanics, which is the actual
+benefit: the per-tick ordering is the load-bearing part and it is now visible at a glance.
+
+### Alternatives Considered and Rejected
+
+**Loading a `.glb` model with a skeletal animation system.** Rejected, and not only because zero
+binary assets is a constraint. There is no DCC tool in this environment, so an authored rig could
+not be edited, inspected or repaired — the project would depend on an artefact nobody could
+maintain. The procedural approach is also period-authentic: PS1 characters were often rigid parts
+rotated about joints, because 1997 hardware had no budget for skinning.
+
+**A WebGL-rendered overlay.** Rejected. It would be quantised to the 480×270 palette and become
+unreadable, and it would be rendered *by* the pipeline it is supposed to be measuring.
+
+**Relaxing `PS1MaterialOptions.map` to optional so the character could be untextured.** Rejected —
+see Q2. The type was encoding a real aesthetic constraint.
+
+**A dither array inside the character shader.** Already rejected in Milestone 1.1 for the world
+shader; the same reasoning applies and the character shares the world material rather than
+introducing a second shader path.
+
+**Building the character as one merged geometry, one draw call.** Considered and deferred rather
+than rejected. Thirteen draw calls for one character is acceptable now, and merging would prevent
+per-part rotation, which is the entire animation mechanism. If characters become numerous in
+Milestone 2, the dynamic ones will need a different approach — noted as a future concern rather
+than solved prematurely.
+
+**Making `KeyboardSampler` do press-edge detection properly.** Rejected *for this commit*,
+deliberately. Doing it here would mean writing the input system twice, and Milestone 1.4 specifies
+a genuinely different design (input-level buffers, remapping, gamepad fallback). The deferral is
+documented in the file header and here.
+
+**Per-foot ground raycasts for the foot IK.** Rejected for now. `CharacterRig.update` accepts the
+offsets and skips the IK when they are null, and the caller passes nulls rather than fabricating
+plausible numbers. Fabricating them would have made the IK look implemented while doing nothing.
+
+### Doubts
+
+1. **Still nothing has been seen running.** This is now the fourth commit with no visual
+   verification, and it is the largest single risk to the project. I can prove the character's
+   *numbers* are right — jump distances to three decimal places, no NaN, determinism across
+   replays — but whether it reads as a person running through a jungle is unknown. The overlay
+   and the playable preview exist specifically to let the user answer that in one session.
+
+2. **The gait is uncalibrated.** `STRIDE_LENGTH_M = 1.9` sets the phase rate, and the swing and
+   knee amplitudes (0.25 + speed×0.55, 0.15 + speed×0.65) are plausible numbers rather than
+   tuned ones. Skating — feet sliding because the phase rate does not match the ground speed —
+   is the classic failure and the most likely thing to need adjusting.
+
+3. **The arms may read as too straight.** `elbowBend` starts at 0.25 rad and does not go negative,
+   so the arms never fully straighten or fully fold. If it looks stiff, the fix is a wider range,
+   and the overlay makes that a live decision.
+
+4. **Thirteen draw calls for one character is more than the aesthetic needs.** It is well inside
+   budget now, but it does not scale. Deferred with reasoning rather than ignored.
+
+5. **The overlay's percentile readout duplicates `PerformanceSnapshot`.** Both compute from the
+   same rolling buffer, through one shared `percentileFrameTime` helper — but the overlay wants
+   p95 and the snapshot wants p99, so there are two callers of one function rather than one. If a
+   third consumer appears, the sample itself should carry both.
+
+6. **The debug key bindings are installed unconditionally, including in a production build.**
+   `-`/`=`/`[`/`]` are harmless and F1 is the conventional toggle, but a release build arguably
+   should not ship them. Milestone 5 is where build configuration exists to gate this, and the
+   deferral is recorded rather than forgotten.
+
+7. **`KeyboardSampler` listens on `window` and is constructed inside `Game.loadLevel`.** A second
+   `Game` instance (a hot reload that did not dispose, for instance) would produce two samplers
+   both writing to the same character. `dispose()` removes them, and `beforeunload` calls it, but
+   the ownership is slightly awkward — the input layer arguably should not be owned by the level
+   loader. Noted for Milestone 1.4, which restructures this anyway.
+
+### Next Steps
+
+1. **Milestone 1.3: the camera rig**, which replaces the placeholder follow camera in `Game.ts`.
+   The GDD specifies a spring arm with a raycast (minimum 1.5 m), follow lerp 0.1, auto-rotate
+   after 0.5 s, and an aim FOV transition from 60° to 45° (and 4°→5° for climbing). Eight edge
+   cases are required, including camera-through-geometry and the auto-rotate-vs-input conflict.
+2. **Milestone 1.4: the real input system**, which replaces `KeyboardSampler` entirely and must
+   own the press-edge detection this commit deliberately left thin, plus the 150 ms jump and
+   200 ms interact input buffers, `localStorage` remapping, gamepad support, and the five
+   enumerated edge cases.
+3. **READMEs for `src/core`, `src/world` and `src/app`**, still owed from the Milestone 1.1 review.
+4. **Manual visual checklist** — M1.1 rendering, the character rig and the overlay all remain
+   unverified visually. This must appear in the milestone report rather than being glossed over.
+5. **A screenshot-capable environment would change this project's risk profile more than any code
+   change.** Recorded as a standing concern.
+
 ## 2026-10-07 (commit 3) — Milestone 1.2: Character Controller
 
 **Status: controller complete and tested; procedural rig and dev overlay deferred to commit 4.**

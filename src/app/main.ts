@@ -136,7 +136,11 @@ async function boot(
   const summary = game.loadLevel(physics);
 
   setLoadingStatus(status, progress, 'Lighting the torches…', 0.92);
-  console.info(`[JungleRelic] Zone 1 built: ${describeLevel(summary)}`);
+  console.info(
+    `[JungleRelic] Zone 1 built: ${describeLevel(summary)}\n` +
+      'Controls: WASD to move, Shift to run, Space to jump, Ctrl or C to crouch, E to interact.\n' +
+      'F1 toggles the developer overlay; [ and ] tune affine warping; - and = tune the vertex snap grid.',
+  );
 
   game.start();
 

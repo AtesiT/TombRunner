@@ -329,6 +329,39 @@ export function createFoliageTexture(): THREE.DataTexture {
  *
  * @returns The dirt texture.
  */
+/**
+ * Threads per texture edge for the cloth weave.
+ *
+ * Twelve threads across a 32-texel texture keeps each thread about 2.7 texels wide, so the weave
+ * survives nearest-neighbour minification instead of aliasing into noise.
+ */
+const CLOTH_THREAD_COUNT = 12;
+
+/**
+ * Generate the character cloth texture: a subtle woven weave with uneven dyeing.
+ *
+ * @returns The texture. Owned by the caller; dispose with the rest of the library.
+ */
+export function createClothTexture(): THREE.DataTexture {
+  return buildTexture(TEXTURE_SIZE, (u, v, rng, noise) => {
+    // A two-frequency weave: the fine term is the thread, the coarse term is uneven dye.
+    const thread =
+      (Math.sin(u * Math.PI * CLOTH_THREAD_COUNT) + Math.sin(v * Math.PI * CLOTH_THREAD_COUNT)) * 0.5;
+    const dye = noise.fbm(u, v, 3, 4);
+
+    // Starting from a neutral mid grey rather than a colour: the per-part vertex colour
+    // supplies the hue, and this texture only modulates brightness. That is what lets one
+    // texture serve a shirt, trousers and boots without tinting any of them wrongly.
+    const brightness = 0.78 + thread * 0.06 + (dye - 0.5) * 0.16;
+    const scaled = Math.max(0, Math.min(1, brightness)) * 255;
+
+    // A rare worn patch, so the material is not perfectly uniform.
+    if (rng.chance(0.015)) return [scaled * 0.86, scaled * 0.84, scaled * 0.82];
+
+    return [scaled, scaled, scaled];
+  });
+}
+
 export function createDirtTexture(): THREE.DataTexture {
   return buildTexture(TEXTURE_SIZE, (u, v, rng, noise) => {
     const base = noise.fbm(u, v, 3, 3);
@@ -426,6 +459,16 @@ export interface TextureLibrary {
   foliage: THREE.DataTexture;
   dirt: THREE.DataTexture;
   water: THREE.DataTexture;
+  /**
+   * Woven cloth, used for the player character and NPC clothing.
+   *
+   * Almost flat by design. On a 480x270 target a character is roughly 40 pixels tall, so any
+   * texture detail beyond a subtle weave reads as noise that makes the silhouette harder to
+   * parse. Its real job is to keep the character subject to the same affine warping, vertex
+   * snapping and palette quantisation as the environment — a character rendered with a plain
+   * white texture among quantised geometry looks pasted on top of the scene.
+   */
+  cloth: THREE.DataTexture;
 }
 
 /**
@@ -441,6 +484,7 @@ export function createTextureLibrary(): TextureLibrary {
     foliage: createFoliageTexture(),
     dirt: createDirtTexture(),
     water: createWaterTexture(),
+    cloth: createClothTexture(),
   };
 }
 
