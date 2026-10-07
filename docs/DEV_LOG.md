@@ -6,6 +6,374 @@
 
 ---
 
+## 2026-10-07 (commit 3) — Milestone 1.2: Character Controller
+
+**Status: controller complete and tested; procedural rig and dev overlay deferred to commit 4.**
+
+I split Milestone 1.2 across two commits because the controller turned out to contain six
+genuine bugs (two of them structural) and a large amount of derived mathematics. Committing a
+verified, tested controller separately from the cosmetic rig keeps the diff reviewable and means
+the interesting failures are recorded while they are still fresh.
+
+### What I Built
+
+**New pure mathematics — `src/core/math/locomotion.ts` (52 tests)**
+
+| Function | Purpose |
+|---|---|
+| `solveJumpArc` | Continuous trajectory from a target peak height |
+| `solveHorizontalSpeedForDistance` | Inverts the arc for a distance target |
+| `predictJumpDistance` | Forward prediction, used to prove the GDD's 6 m is unreachable |
+| `effectiveRiseGravity` | The rise gravity after hold-scaling — **the fix for P1** |
+| `discreteTakeoffVelocity` | Compensates semi-implicit Euler's peak overshoot |
+| `solveJumpLaunch` | The single source of truth for jump takeoff |
+| `slopeAngleFromNormalY` / `classifySlope` | The four GDD slope bands, NaN-safe |
+| `canJumpFromBand` / `hasGroundFriction` | Band capability queries |
+| `downslopeAcceleration` / `projectVelocityOntoSurface` | Slide physics |
+| `TickWindow` / `millisecondsToTicks` | Coyote time and jump buffering, in ticks |
+| `approachSpeed` / `speedDeltaForTransition` | Frame-rate-independent acceleration |
+| `approachAngle` / `wrapAngle` | Shortest-path turning |
+
+This file deliberately imports nothing, so it is usable anywhere and testable in isolation.
+
+**The discarding state machine — `src/gameplay/LocomotionStates.ts` (33 tests)**
+
+Seven mutually exclusive states (grounded, airborne, mantle, ledge-hang, climb, water,
+zip-line) in a single discarding enum. This is the R15 mitigation made structural: illegal
+combinations such as "climbing while mantling" are *unrepresentable*, not merely forbidden by
+discipline. Transitions are a pure function of `(state, context, intent)`, so every boundary and
+every illegal input can be asserted without a physics world.
+
+The transition priority is explicit and documented top-to-bottom, because "what wins when
+several conditions are true at once" is otherwise the source of subtle bugs:
+
+```
+1. Zip line   (committed traversal)
+2. Water      (physical override)
+3. Mantle     (in progress unless jump-cancelled)
+4. Ledge hang (airborne grab, then hold)
+5. Climb      (authored surface + intent)
+6/7. Airborne / Grounded
+```
+
+Also: **logic first, animation follows.** No transition waits for an animation. A jump during a
+mantle cancels it on the same tick; the animation is cosmetic and is cut short.
+
+**The ground probe — `src/gameplay/GroundProbe.ts`**
+
+Five rays in a cone: a centre ray plus four at 0.3 m. A majority vote (≥3) declares ground, the
+averaged normal drives slope handling, and the per-ray hit pattern gives edge proximity. Layer
+selection is explicit (`StaticWorld` + `PropDynamic`); trigger volumes and water sensors are
+excluded because including them would let the player stand on a checkpoint or on the surface of
+water.
+
+**The controller — `src/gameplay/CharacterController.ts` (25 integration tests)**
+
+Mostly glue: probe, resolve state, integrate velocity, hand the result to Rapier. The interesting
+decisions live in the tested modules above it. Responsibilities are separated specifically so
+this split is possible.
+
+### The Ten Mandatory Edge Cases — All Implemented and Tested
+
+| # | Case | How it is handled | Test asserts |
+|---|---|---|---|
+| 1 | Jump + crouch on a ledge edge | Crouch wins: `tryConsumeJump` returns early when `crouchHeld`. The buffer is **not** cleared, so releasing crouch inside the window still jumps. | y does not rise; a control run without crouch *does* jump, proving the test is not vacuous |
+| 2 | Land on a slope mid-jump | Ground-normal projection **before** gravity, plus `hasGroundFriction` gating. 25° is walkable, so no slide force exists. | Position drift < 5 cm over a full second of no input |
+| 3 | Run into a wall airborne | Blocked upward movement zeroes `velocity.y`; slide velocity is applied along the surface. | Comes to rest at 0.97 m pressed against the wall, never above it, never inside |
+| 4 | Jump from a moving platform | Surface velocity derived from the ground collider's per-tick translation delta, applied to the move **and** inherited at takeoff | Carried 1.5 m+; airborne travel after the platform vanishes > 0.2 m |
+| 5 | Fall from extreme height | Kill plane at y = −30 plus a non-finite-position guard, both routing to a positional-only respawn | Respawns < 1 m from spawn, then settles and jumps normally; health untouched |
+| 6 | Jump during a mantle | `Mantle` + `jumpRequested` → `Airborne` immediately, even at 99% completion | No longer in `Mantle` on the same tick; never inside the wall |
+| 7 | Climb a non-climbable surface | No `Climb` entry without an authored surface; `rejectedGrab` is emitted **once per press** as the explicit feedback signal | Never enters `Climb`, never hangs, and the refusal is observable |
+| 8 | Release a ledge during a pull-up | `hangingInputReleased` → `Airborne`; the state machine can never return `LedgeHang` on the same tick | Never ends in `LedgeHang`; 10 s of no input always resolves to grounded or airborne |
+| 9 | Jump from a ledge hang | Directed along the wall's *outward normal*, independent of facing | Dot product with the normal > 0.5 for all four cardinal walls |
+| 10 | Land on an enemy | `deflectOffCharacter` grants outward + upward velocity, with a stable fallback for exactly coincident positions | Bounces up and out; the reverse (enemy on the player's head) also escapes |
+
+### Problems
+
+**P1 — the jump arc was solved against the wrong gravity. (Structural.)**
+
+*Symptom:* a held standing jump measured 3.92 m instead of 3.0 m, and 0.900 s of airtime
+instead of 0.701 s.
+
+*Root cause:* `applyJump` solved the trajectory with the nominal rise gravity (26 m/s²), but
+`integrateAirborne` multiplied that gravity by `JUMP_HOLD_GRAVITY_SCALE` (0.75) while the
+control was held. The two disagreed. The peak became `2.0 / 0.75 = 2.67 m`, the airtime became
+0.879 s, and because the launch speed had been derived from the nominal airtime the distance
+overshot by 26%.
+
+*Fix:* `effectiveRiseGravity()` is now the single place the scaling happens, called by both the
+solver and the integrator. They cannot disagree again.
+
+*Lesson worth recording:* the bug was not "a multiply in the wrong place". It was that two
+call sites each computed the same physical quantity independently. Any quantity computed in two
+places will eventually disagree, and the fix is to make it computable in one.
+
+**P2 — the ground probe could never touch the ground. (Structural, would have shipped.)**
+
+*Symptom:* `grounded` was `false` on every tick, forever.
+
+*Root cause:* `GROUND_PROBE_LENGTH_M` was 0.45 m. The capsule body origin rests
+`halfHeight + radius + offset = 0.97 m` above the surface, and the probe origin sits 0.1 m above
+that, so the ray needs ~1.17 m of reach to see the floor it is standing on. At 0.45 m the ray
+ended 1.32 m above the ground.
+
+**The GDD's own formula was wrong too.** GDD §4.4 specifies `capsuleHalfHeight + 0.45`, which
+omits the capsule *radius* and is still 2 cm short.
+
+*Why it was so hard to see:* the character did not fall through the floor. Rapier's solver caught
+it, `computedGrounded()` reported `true` throughout, and the player could walk and run normally.
+The controller was simply never *told* they were standing on anything, so the state machine
+stayed in `Airborne` and jumps could never fire. A running "jump" measured 20 m because the
+character spent the entire test airborne at run speed.
+
+The generalisable trap: **a probe that silently fails to hit anything produces no error, only
+wrong answers.** The fix is now derived from the capsule geometry rather than written as a
+literal, so it cannot drift out of step again, and there is a test that compares the ray's reach
+against the capsule's actual dimensions — because no assertion about "is the character on the
+ground" can catch this (the character *was* on the ground).
+
+**P3 — the jump was cancelling its own momentum.**
+
+*Symptom:* a running jump measured 20.0 m of horizontal travel.
+
+*Root cause:* `applyJump` *replaced* the horizontal velocity with `direction × launchSpeed`.
+Direction came from raw input (camera frame) while the velocity being replaced had been built
+along the character's *facing*, and the turn rate had not yet caught up — so the two were up to
+24° apart and the difference was silently discarded. Worse, the resulting speed was below run
+speed, so the character never landed during the test window.
+
+*Fix:* rotate the existing velocity rather than replace it. The launch speed only ever *raises*
+the magnitude, which is what "a jump preserves momentum" actually means. A quarter-weight steer
+toward the requested direction allows aim correction without erasing a committed run-up.
+
+**P4 — air control was scrubbing the jump boost.**
+
+*Symptom:* a running jump travelled 5.04 m instead of 6.0 m, after P3 was fixed.
+
+*Root cause:* `integrateAirborne` approached a horizontal target of `RUN_SPEED_MPS` (6.0)
+unconditionally. But a full-momentum jump launches at 7.05 m/s, so air control *decelerated*
+every running jump from 7.05 back to 6.0 during flight, cancelling the very boost that exists to
+make 6 m reachable. The feature was working against itself.
+
+*Fix:* when already faster than run speed, air control steers the direction but leaves the
+magnitude alone. Steering has no business imposing a speed ceiling on a body that is already
+moving faster than a run.
+
+**P5 — semi-implicit Euler overshot the documented peak by 4%.**
+
+*Symptom:* a 2.0 m jump peaked at 2.086 m; a 2.5 m jump at 2.598 m.
+
+*Root cause:* `v0 = sqrt(2gh)` is exact for continuous motion but overshoots on a discrete
+integrator by `v0·dt/2` — 7.4 cm at 60 Hz, and 8.6 cm measured (the extra comes from the one
+tick the probe still reports contact). Predicted analytically, then confirmed by measurement.
+
+*Why it was worth fixing rather than accepting:* the GDD specifies the peak height and level
+gaps are authored against it. A documented number that quietly runs 4% high is exactly the drift
+that eventually makes a jump that "should" clear a gap fail. `discreteTakeoffVelocity` solves
+`v²/(2g) + v·dt/2 = h` for `v`, which is three lines and makes the specification literally true.
+
+Related, in the same fix: airtime is now counted in **whole ticks**. A continuous airtime of
+0.7533 s is not reachable — the character lands on tick 46, not tick 45.19 — so dividing the
+distance target by a fractional airtime missed by the discarded fraction. Counting rise ticks
+plus fall ticks and dividing out over the whole-tick total makes the distance exact on the
+simulation grid.
+
+**P6 — `JUMP_RELEASE_CUT` compounded once per tick instead of once per release.**
+
+*Symptom:* a tapped jump peaked far lower than the 45% cut implies.
+
+*Root cause:* the cut was applied every tick the control was unheld while rising. At 45% per
+tick, twelve ticks of rising became a `0.55¹² = 0.08` multiplier — a 92% cut rather than 45%, and
+a result that depended on how many ticks the rise happened to last.
+
+*Fix:* edge-triggered on the release transition, tracked via `jumpHeldLastTick`. The reduction is
+now exactly the configured fraction.
+
+**P7 — NaN slipped through a `<= 0` guard.** *(Found by the degenerate-input test.)*
+
+`NaN <= 0` is `false`, so `if (peakHeight <= 0) return zeroArc` let NaN straight through and
+produced a NaN takeoff velocity. A NaN velocity propagates into the character's position, and a
+NaN position is **unrecoverable**: every subsequent collision query fails, so the character can
+neither move nor land. Fixed with `/!Number.isFinite(x) || x <= 0/` throughout, plus a swept test
+across a wide range of finite inputs and a guard on `horizontalDistance` (found the same way,
+when a NaN distance target divided through into the launch speed).
+
+The generalisable rule: **every comparison against NaN is false, so every guard must be written
+as a positive test for what is acceptable, never a negative test for what is not.**
+
+**P8 — the platform-momentum patch silently failed to apply.**
+
+The scripted edit that was supposed to add platform inheritance in `applyJump` matched nothing —
+the search string had the wrong indentation — and, because the edit was unasserted, it reported
+success. The feature simply did not exist while the code read as though it did.
+
+The only reason it was caught is that the test asserted an **observable outcome** (the character's
+position) rather than trusting that the feature was present. Two lessons, both now applied: every
+scripted edit asserts that it matched, and tests measure behaviour rather than re-reading the code
+back to itself.
+
+### Alternatives Considered and Rejected
+
+**A hierarchical state machine (grounded → moving/crouching/jumping) instead of a flat discarding
+enum.** Rejected. A hierarchy genuinely models "a jumping state that can be entered from walking
+or crouching", but it multiplies the states the player can be in, and the extra expressiveness
+buys nothing here because the derived state (walking vs running) is a *speed*, not a state. R15
+explicitly warns about state-space growth, and a flat seven-state enum with the speed carried as
+data is smaller and just as expressive.
+
+**A separate `isCrouching` boolean alongside the state.** Rejected. Crouch is orthogonal to
+locomotion — a player can crouch while grounded, airborne, or idle — so it belongs in the intent,
+not the state. Putting it in the enum would have doubled the state count for no benefit and
+proven the point of R15 by creating the very combinatorial explosion it warns about.
+
+**An animation-event-driven controller** (accept the mantle only when the animation reports a
+window). Rejected in favour of the "logic first, animation follows" rule. Animation-driven
+windows feel correct in a demo and terrible in play: the player presses jump, nothing happens for
+200 ms, and the game feels broken. Every transition here is decided from input and world state
+alone.
+
+**Impulse-driven platform motion** (a Rapier kinematic-velocity body). Rejected. It is stepped by
+the solver, so the platform's position on a given tick depends on solver internals rather than on
+the fixed-step loop — which would make edge case 4 untestable. Setting the translation directly
+from our loop makes the platform's motion exactly reproducible.
+
+**Accepting the 4% peak overshoot as "close enough".** Rejected, and recorded here as a
+deliberate rejection rather than an oversight. Small, bounded, systematic errors in a specification
+are how "the jump that should work" stops working three milestones later.
+
+**Solving the arc numerically with a fixed-step simulation at load time.** Considered as an
+alternative to the closed-form discrete compensation. Rejected: the closed form is exact,
+three lines, and testable in isolation, whereas a load-time simulation would be a second
+implementation of the integrator that could disagree with the real one — which is P1 all over
+again.
+
+### Doubts
+
+1. **I have never seen this run.** There is still no browser or headless-render tooling in this
+   sandbox, so the controller is verified numerically and behaviourally but not *felt*. Coyote
+   time, the 150 ms buffer and the 0.25 steer weight are all plausible numbers from the
+   literature; whether they feel right is unknowable from here. This is the honest biggest gap
+   in the milestone and it is why the manual checklist exists.
+
+2. **`TURN_RATE_GROUND_DEG` may be too slow to read as responsive.** Turning at a bounded rate
+   and moving along the *facing* (rather than along the input) is the single biggest contributor
+   to the feeling of mass — and also the fastest way to make a character feel like a boat. I have
+   no way to calibrate this without playing it. It is the first number I would change.
+
+3. **The mantle geometry is untested against real level geometry.** `detectMantleLedge` probes
+   0.35–0.9 m ahead and accepts ledges between 0.4 m and 1.2 m. On Zone 1's actual temple
+   platforms no mantle was produced in the integration test, and the test documents that rather
+   than pretending otherwise. I do not yet know whether that is correct behaviour (autostep
+   handling the 0.8 m steps) or a detection failure.
+
+4. **`GROUND_PROBE_RADIUS_M = 0.3` is asserted but not validated.** The majority vote needs three
+   of five rays, so a 0.6 m-wide cone on a 0.35 m-radius capsule is a guess about how narrow a
+   ledge the player should be able to stand on. Too narrow and the player falls off invisible
+   edges; too wide and they stand on air. Untested against real geometry.
+
+5. **Edge case 9 is tested at the rule level, not end-to-end.** Ledge hanging needs authored climb
+   surfaces (Milestone 2.3), so `ledgeAvailable` is currently always false and the controller
+   cannot enter `LedgeHang`. The *direction rule* is tested exhaustively, but the integration path
+   is not. I have chosen to test the part that exists rather than skip the case, and to say so
+   plainly.
+
+6. **`rescue()` logs with `console.warn`.** RULE #5 and the review protocol both require no stray
+   console output, and there is an argument that a safety net firing is worth surfacing in the
+   debug overlay instead. I kept the warning because a rescue means something went wrong and
+   silence would hide it; it fires once per rescue, never per tick. Flagged for review at the
+   milestone gate.
+
+7. **The stuck watchdog is belt-and-braces, not a fix.** Thirty seconds in a precarious state
+   teleports the player to spawn. If it ever fires, there is a real bug elsewhere and the watchdog
+   has merely hidden it. It is instrumented (`rescues`, `lastRescueReason`) so a future
+   play-test can tell whether it is ever reached.
+
+### Deep Debug Sessions
+
+**`### Deep Debug Session: The Probe That Never Hit the Ground`**
+
+*Exact error:* no error. `grounded` was `false` on every tick, `currentState` stayed `airborne`,
+and jumps never fired. A "running jump" test measured 20 m of travel.
+
+*Attempt 1 — suspect the probe origin.* Hypothesised the rays were starting inside the capsule
+and hitting a self-collision. **Failed:** rays exclude the player's own layer, and the origin was
+already inside the capsule by design.
+
+*Attempt 2 — suspect the layer filter.* Hypothesised the two-way group check (the trap already
+documented for `intersectWithShape`) was biting again. **Failed:** `queryGroupsFor` was being used
+correctly and manual raycasts from the same position hit the ground fine.
+
+*Attempt 3 — suspect the physics was not primed.* **Failed:** the world was primed and
+`castRay` worked when called directly.
+
+*Hypothesis (correct):* the ray simply is not long enough, and the arithmetic has never been
+checked end-to-end. Computed it explicitly: body origin rests at `0.6 + 0.35 + 0.02 = 0.97 m`,
+probe origin is at `position.y + 0.1`, and the ray extends 0.45 m down, reaching
+`position.y − 0.35` — which is 0.72 m *above* the ground at `position.y − 0.97`. The GDD's own
+formula (`halfHeight + 0.45 = 1.05`) is also 2 cm short, because it omits the capsule radius.
+
+*Untried alternatives:* (a) temporarily log every raycast's origin, direction and toi to confirm
+the geometry empirically rather than arithmetically; (b) build a two-line diagnostic that casts a
+single 1.5 m ray straight down from the body origin and reports the hit distance.
+
+*Chosen next approach:* fix it by **deriving** the constant from the capsule geometry instead of
+writing a literal, add a regression test that compares the ray's reach against the capsule's
+dimensions, and record that the GDD formula was wrong. Adopted immediately — it works, and the
+derivation means the class of bug cannot recur.
+
+*Why this one is worth the space:* the character was on the ground the entire time. Rapier caught
+it, `computedGrounded()` said so, and the player could run around. Every "is the character on the
+ground?" assertion passes while the feature is completely broken. Only comparing the probe's
+reach against the capsule's geometry — or noticing that a jump never fires — reveals it.
+
+**`### Deep Debug Session: The Running Jump That Measured Twenty Metres`**
+
+*Exact error:* no assertion failure initially. A running jump reported 20.0 m of horizontal
+travel, which was obviously wrong but not obviously *which* wrong.
+
+*Attempt 1 — suspect the launch speed derivation.* Computed the expected speeds by hand (standing
+3.913, running 7.059). **Failed:** the solver produced exactly those numbers; the launch velocity
+was correct.
+
+*Attempt 2 — suspect the jump never landing.* Hypothesised the character was airborne for the
+whole measurement window. **Confirmed as a symptom, not the cause:** airtime measured 1.000 s
+against a predicted 0.784 s, so the flight was too long, but that alone does not produce 20 m.
+
+*Attempt 3 — suspect the arc gravity (P1).* **Partially confirmed:** the arc was indeed solved
+against the wrong gravity, and fixing that brought the airtime from 1.000 s to 0.783 s and the
+distance from 20.0 m to 6.236 m. But 6.236 m is still 4% over the 6.0 m target.
+
+*Hypothesis (correct, for the remaining 4%):* the airtime is longer than the arc predicts because
+the character floats above the ground for one tick after takeoff, while the probe still reports
+contact — 1.17 m of reach against a 0.12 m ground tolerance. Combined with semi-implicit
+Euler's `v0·dt/2` overshoot, this accounts for the residual exactly.
+
+*Untried alternatives:* (a) instrument the controller to record `velocity` and `position` on
+every tick of a jump and plot the trajectory against the analytic arc, to see precisely where the
+two diverge; (b) shorten the probe so it loses contact sooner and measure whether the overshoot
+shrinks accordingly.
+
+*Next occurrence protocol:* if a jump figure is wrong again, the first diagnostic is no longer
+guesswork — dump `solveJumpLaunch`'s output alongside the measured trajectory and compare
+`riseTicks`/`fallTicks` against the observed tick counts. The two must match exactly, and a
+mismatch localises the fault to either the solver or the integrator immediately.
+
+### Next Steps
+
+1. **Procedural character rig** (`src/gameplay/CharacterRig.ts`). Zero binary assets is a
+   constraint, so the character is built from low-poly primitives with a weighted blend of pose
+   generators rather than clips. Procedural slope adjustment from the ground normal, and per-foot
+   IK via a raycast from each hip.
+2. **Dev overlay** — live shader and tuning values, `rescues`/`lastRescueReason`, probe state,
+   tick time. Needed to resolve the M1.1 open questions about shader appearance, which cannot be
+   answered without a screen.
+3. **READMEs** for `src/core`, `src/world`, `src/app`, plus a `src/gameplay/README.md` covering
+   the discarding-state decision and the derived-jump reasoning.
+4. **Manual visual checklist** entry — M1.1 rendering and the M1.2 character both remain visually
+   unverified. This must be stated in the milestone report rather than glossed.
+5. Carry the `detectMantleLedge` question (doubt 3) into Milestone 2.3 when authored climb
+   surfaces exist and it can be validated against real geometry.
+
 ## 2026-10-07 (commit 2) — Milestone 1.1: Scene & Rendering Pipeline
 
 **Commit scope:** the PS1 rendering pipeline, procedural texturing, low-poly geometry, the Zone 1 jungle environment, the physics seam with its prime-step guard, project scaffolding (Vite/TypeScript config, `index.html`), 22 new tests (80 total), and three READMEs. No gameplay code — the character controller is Milestone 1.2.

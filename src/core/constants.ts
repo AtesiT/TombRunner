@@ -90,9 +90,82 @@ export const JUMP_COOLDOWN_S = 0.2;
 /** Fraction of upward velocity removed when the jump button is released early. */
 export const JUMP_RELEASE_CUT = 0.45;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INPUT ASSISTANCE — the "forgiveness layer" (GDD §4.3)
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Ground speed multiplier while crouching.
+ *
+ * A crouch-walk, slow enough to read as deliberate but not so slow that traversing a tunnel
+ * becomes tedious. It also multiplies into the jump lock in edge case 1, so crouch is a real
+ * movement mode rather than only a jump suppressor.
+ */
+export const CROUCH_SPEED_SCALE = 0.35;
+
+/** Horizontal distance a standing jump must clear, from the GDD. */
+export const JUMP_STANDING_DISTANCE_M = 3.0;
+
+/** Horizontal distance a full-speed running jump must clear, from the GDD. */
+export const JUMP_RUNNING_DISTANCE_M = 6.0;
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * DERIVED JUMP CONSTANTS — documentation and test references, not runtime inputs
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The character controller does NOT read these at runtime. It calls `solveJumpLaunch()`
+ * (src/core/math/locomotion.ts), which derives the takeoff velocities from the targets and
+ * the actual gravity profile. These constants exist so the derived numbers are visible in
+ * the tuning table and so the tests can assert the solver still reproduces them.
+ *
+ * **If a test here fails, the solver changed — do not "fix" it by editing these values.**
+ *
+ * ─── WHY A FORWARD IMPULSE EXISTS AT ALL ────────────────────────────────────────────
+ * With the GDD's asymmetric gravity, a 6 m/s run produces only 4.70 m of jump travel at a
+ * 2.5 m peak, so the GDD's 6 m running jump is *unreachable* at run speed. The options were:
+ *
+ *   • Weaken gravity — rejected. It would make the jump floaty and undo the entire point of
+ *     asymmetric gravity, which is the single largest contributor to the TR2013 feel.
+ *   • Raise run speed past 6 m/s — rejected. It would make ground movement frantic and
+ *     contradict the GDD's own walk/run numbers.
+ *   • A forward impulse at takeoff — chosen. A running jump thrusts forward, which is what
+ *     momentum-based platformers do and what the GDD's requirement that a running jump goes
+ *     further than a standing one is actually describing.
+ *
+ * ─── THE HOLD-GRAVITY CORRECTION ────────────────────────────────────────────────────
+ * `JUMP_HOLD_GRAVITY_SCALE` (0.75) softens the rise while the control is held, so the arc
+ * must be solved against the *scaled* gravity. Solving against nominal gravity made a held
+ * jump peak at `2.0 / 0.75 = 2.67 m` instead of 2.0 m and raised its airtime from 0.701 s
+ * to 0.879 s, which then overshot the distance target by 26%. Measured, not theorised.
+ *
+ * ─── THE DISCRETE-INTEGRATOR CORRECTION ─────────────────────────────────────────────
+ * The controller integrates with semi-implicit Euler, which peaks `v0·dt/2` above the
+ * target: 8.6 cm on the 2.0 m jump, measured. `discreteTakeoffVelocity()` compensates, and
+ * airtime is counted in *whole ticks* so the distance target is exact on the tick grid
+ * rather than 0.19 of a tick short. The figures below are the compensated held values.
+ *
+ *   Standing, held: v0 8.671, 27+19 ticks, airtime 0.7667 s -> 3.0 m needs 3.9130 m/s
+ *   Running,  held: v0 9.713, 30+21 ticks, airtime 0.8500 s -> 6.0 m needs 7.0588 m/s
+ *
+ * Measured end-to-end on the real controller: standing 2.997 m / 2.000 m peak, running
+ * 6.109 m / 2.498 m peak (the extra 0.109 m is one tick of post-landing running).
+ */
+
+/** Reference horizontal launch speed for a standing jump at the solved arc. */
+export const JUMP_STANDING_SPEED_MPS = 3.913;
+
+/** Reference horizontal launch speed for a full-speed running jump at the solved arc. */
+export const JUMP_RUNNING_SPEED_MPS = 7.0588;
+
+/** Reference airtime of a held standing jump, in seconds (46 ticks). */
+export const JUMP_STANDING_AIRTIME_S = 0.7667;
+
+/** Reference airtime of a held running jump, in seconds (51 ticks). */
+export const JUMP_RUNNING_AIRTIME_S = 0.85;
+
+/** Danger threshold: below this many ticks of airtime a jump would feel unresponsive. */
+export const JUMP_MIN_AIRTIME_TICKS = 20;
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * INPUT ASSISTANCE — the "forgiveness layer" (GDD §4.3)
+ * ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Coyote time: how long a jump remains legal after leaving a ledge.
@@ -116,17 +189,63 @@ export const LEDGE_ASSIST_M = 0.3;
 export const CORNER_CORRECTION_M = 0.25;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PLAYER CAPSULE AND CONTROLLER GEOMETRY
+// ─────────────────────────────────────────────────────────────────────────────
+// Declared HERE, above the ground-detection block, because the probe's ray length is
+// derived from these values. `const` declarations are hoisted but not initialised, so a
+// module that reads them earlier than their declaration throws a ReferenceError in the
+// temporal dead zone at import time — which would present as the entire game failing to
+// load, with the error pointing at a constants file.
+
+/** Rapier character controller skin width. */
+export const CONTROLLER_OFFSET_M = 0.02;
+/** Capsule half-height (the cylindrical section), excluding the hemispherical caps. */
+export const PLAYER_CAPSULE_HALF_HEIGHT_M = 0.6;
+/** Capsule radius. */
+export const PLAYER_CAPSULE_RADIUS_M = 0.35;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GROUND DETECTION — 5-ray cone (GDD §4.4)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Radius of the ray cone around the player origin. */
 export const GROUND_PROBE_RADIUS_M = 0.3;
 
-/** How far below the capsule the probe rays look. */
-export const GROUND_PROBE_LENGTH_M = 0.45;
-
 /** Origin height of the probe rays above the player origin (inside the capsule). */
 export const GROUND_PROBE_ORIGIN_Y_M = 0.1;
+
+/**
+ * Extra reach beneath the capsule's bottom, so uneven terrain and the small floating
+ * offset introduced by ground snapping are both covered.
+ */
+export const GROUND_PROBE_MARGIN_M = 0.2;
+
+/**
+ * How far below the probe origin the ground rays look.
+ *
+ * ─── DERIVED, AND WRONG IN THE GDD (§4.4) UNTIL MEASURED ────────────────────────────
+ * The GDD specified this as `capsuleHalfHeight + 0.45` = 1.05 m, which looks reasonable
+ * and is *not enough*. The body origin rests `halfHeight + radius + controllerOffset` above
+ * the surface, so the distance the ray must cover is that entire height, not just the
+ * cylindrical half-height. The GDD's formula omitted the capsule radius and ended up 2 cm
+ * short of the ground it was trying to detect — and the originally implemented value of
+ * 0.45 m was 1.32 m short, meaning the probe could **never** register ground.
+ *
+ * The consequence of the bug was instructive: the character fell, was physically caught by
+ * Rapier (`computedGrounded()` was true throughout), but the probe reported `grounded:
+ * false` on every tick, so the state machine never left `Airborne`. The player could still
+ * run around — the controller was simply never told they were standing on anything. A jump
+ * therefore never fired, and a "running jump" measured 20 m because the character spent the
+ * whole test nominally airborne at run speed.
+ *
+ * Derived here from the capsule geometry so it can never drift out of step with it again,
+ * and asserted by `test/integration/character-controller.test.ts`.
+ */
+export const GROUND_PROBE_LENGTH_M =
+  PLAYER_CAPSULE_HALF_HEIGHT_M +
+  PLAYER_CAPSULE_RADIUS_M +
+  CONTROLLER_OFFSET_M +
+  GROUND_PROBE_MARGIN_M; // = 1.17 m
 
 /**
  * Measured resting height of the player body origin (docs/DEV_LOG.md Doubt #8).
@@ -180,6 +299,14 @@ export const MANTLE_HIGH_MAX_M = 1.2;
 
 /** Duration of the low mantle. Cancellable; never gates player input. */
 export const MANTLE_LOW_DURATION_S = 0.35;
+
+/**
+ * Forward drift speed while mantling.
+ *
+ * Keeps the character moving onto the ledge rather than climbing straight up its face and
+ * ending the mantle still against the wall.
+ */
+export const MANTLE_FORWARD_DRIFT_MPS = 1.6;
 
 /** Duration of a vault over a low obstacle at speed. */
 export const VAULT_DURATION_S = 0.25;
@@ -239,8 +366,6 @@ export const BEAM_WIDTH_M = 0.25;
 // PHYSICS ADAPTER
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Rapier character controller skin width. */
-export const CONTROLLER_OFFSET_M = 0.02;
 
 /** Distance the controller may be pulled down to stay attached to the ground. */
 export const SNAP_TO_GROUND_M = 0.4;
@@ -248,11 +373,7 @@ export const SNAP_TO_GROUND_M = 0.4;
 /** Assumed player mass, used when pushing dynamic bodies. */
 export const PLAYER_MASS_KG = 80;
 
-/** Capsule half-height (the cylindrical section), excluding the hemispherical caps. */
-export const PLAYER_CAPSULE_HALF_HEIGHT_M = 0.6;
 
-/** Capsule radius. */
-export const PLAYER_CAPSULE_RADIUS_M = 0.35;
 
 /** Camera collision probe radius. Larger than a ray to prevent near-plane pop-through. */
 export const CAMERA_PROBE_RADIUS_M = 0.25;

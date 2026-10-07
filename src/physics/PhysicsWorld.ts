@@ -390,6 +390,57 @@ export class PhysicsWorld {
    *
    * @param handle - The collider handle returned by {@link createStaticCollider}.
    */
+  /**
+   * Move an existing collider, which is how moving platforms are implemented.
+   *
+   * ─── WHY THIS EXISTS ────────────────────────────────────────────────────────────────
+   * A moving platform could be a dynamic body driven by forces, or a kinematic body with a
+   * velocity. Both are worse than moving the collider directly:
+   *   • A dynamic body needs a motor and drifts under load, so a platform carrying the player
+   *     visibly sags.
+   *   • A Rapier kinematic-velocity body is stepped by the solver, so the platform's position
+   *     on a given tick depends on solver internals rather than on our fixed-step loop.
+   *
+   * Setting the translation from the fixed-step loop makes the platform's motion *exactly*
+   * reproducible, which is what lets edge case 4 ("a jump from a moving platform inherits its
+   * velocity") be asserted rather than merely observed.
+   *
+   * This is safe to call on a static collider: Rapier treats a fixed body moved by
+   * `setTranslation` as teleported, and the character controller's ground probe reads the new
+   * position on the very next tick.
+   *
+   * @param handle - A handle returned by {@link createStaticCollider}.
+   * @param translation - The new world-space centre.
+   * @throws If the handle is unknown, because silently doing nothing would present as a
+   *   platform that refuses to move and would be blamed on the character controller.
+   */
+  public setColliderTranslation(handle: number, translation: Vec3Like): void {
+    const owner = this.colliderOwners.get(handle);
+    if (!owner) {
+      throw new Error(`setColliderTranslation: unknown collider handle ${handle}.`);
+    }
+    if (!Number.isFinite(translation.x) || !Number.isFinite(translation.y) || !Number.isFinite(translation.z)) {
+      throw new Error('setColliderTranslation requires a finite position.');
+    }
+    owner.setTranslation(translation, true);
+  }
+
+  /**
+   * Read a collider's current world-space translation.
+   *
+   * Used by the character controller to compute how far the surface it is standing on moved
+   * during the last tick, which is how a moving platform carries the player.
+   *
+   * @param handle - A handle returned by {@link createStaticCollider}.
+   * @returns The collider's world translation, or null if the handle is unknown.
+   */
+  public colliderTranslation(handle: number): Vec3Like | null {
+    const owner = this.colliderOwners.get(handle);
+    if (!owner) return null;
+    const translation = owner.translation();
+    return { x: translation.x, y: translation.y, z: translation.z };
+  }
+
   public removeCollider(handle: number): void {
     this.surfaceTypes.delete(handle);
 

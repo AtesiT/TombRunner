@@ -81,14 +81,25 @@ This is an adventure, not a horror game.
 npm test
 ```
 
-Four suites, 80 tests, all running headlessly in Node:
+Seven suites, 190 tests, all running headlessly in Node:
 
-| Suite | Covers |
-|---|---|
-| `test/characterisation/` | Pins the observed behaviour of Rapier's character controller, including a permanent-corruption bug discovered in Phase 0 |
-| `test/unit/ps1-math.test.ts` | Vertex snapping, the affine-UV derivation, letterboxing, terminator clamping, palette quantisation |
-| `test/unit/shader-uniforms.test.ts` | Shader/JS uniform agreement, GLSL ES 1.00 compatibility lint, FOV conversion |
-| `test/integration/level-build.test.ts` | Builds the real level and lands a real character on the generated terrain |
+| Suite | Covers | Count |
+|---|---|---:|
+| `test/characterisation/` | Pins the observed behaviour of Rapier's character controller, including a permanent-corruption bug discovered in Phase 0 | 20 |
+| `test/unit/ps1-math.test.ts` | Vertex snapping, the affine-UV derivation, letterboxing, terminator clamping, palette quantisation | 38 |
+| `test/unit/locomotion.test.ts` | The jump-arc solver, the derived GDD jump constants, slope bands, coyote/buffer windows, turning | 52 |
+| `test/unit/locomotion-states.test.ts` | The discarding state machine: transition priority, jump rules per state, illegal combinations | 33 |
+| `test/unit/shader-uniforms.test.ts` | Shader/JS uniform agreement, GLSL ES 1.00 compatibility lint, FOV conversion | 17 |
+| `test/integration/character-controller.test.ts` | Real Rapier: the **ten mandatory edge cases**, moving-platform carry, safety nets, determinism | 25 |
+| `test/integration/level-build.test.ts` | Builds the real level and lands a real character on the generated terrain | 5 |
+| **Total** | | **190** |
+
+The jump distances the level design is authored against are asserted numerically: a standing
+jump clears **2.997 m** at a **2.000 m** peak, and a full-speed running jump clears **6.109 m**
+at a **2.498 m** peak (the extra 0.109 m is one tick of post-landing running).
+
+See `src/gameplay/README.md` for what the controller tests verify and — just as importantly —
+what they cannot.
 
 **Honest gap:** Vitest cannot compile GLSL or run WebGL, so "does it look right" is not
 covered by CI. The mitigation is that all shader *mathematics* lives in unit-tested

@@ -428,11 +428,62 @@ export function mergeGeometries(geometries: readonly THREE.BufferGeometry[]): TH
     throw new Error('mergeGeometries requires at least one geometry.');
   }
 
+  const sizes = measureMergeInputs(geometries);
+
+  const positions = new Float32Array(sizes.vertexCount * 3);
+  const normals = new Float32Array(sizes.vertexCount * 3);
+  const uvs = new Float32Array(sizes.vertexCount * 2);
+  const colors = new Float32Array(sizes.vertexCount * 3);
+  const indices = new Uint32Array(sizes.indexCount);
+
+  let vertexOffset = 0;
+  let indexOffset = 0;
+
+  for (const geometry of geometries) {
+    vertexOffset = appendGeometry(geometry, {
+      positions,
+      normals,
+      uvs,
+      colors,
+      indices,
+      vertexOffset,
+      indexOffset,
+    });
+    indexOffset += indicesLength(geometry);
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  merged.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  merged.setIndex(new THREE.BufferAttribute(indices, 1));
+  return merged;
+}
+
+/** Vertex and index totals for a merge, validated up front. */
+interface MergeSizes {
+  vertexCount: number;
+  indexCount: number;
+}
+
+/**
+ * Validate every input geometry and total their vertex and index counts.
+ *
+ * Validating all inputs before allocating means a malformed geometry throws *before* several
+ * megabytes of typed arrays have been created, rather than halfway through filling them and
+ * leaving a half-populated buffer to be rendered.
+ *
+ * @param geometries - The geometries to merge.
+ * @returns The totals needed to size the output arrays.
+ * @throws If any geometry is missing a position attribute, or lacks normals or UVs.
+ */
+function measureMergeInputs(geometries: readonly THREE.BufferGeometry[]): MergeSizes {
   let vertexCount = 0;
   let indexCount = 0;
+
   for (const geometry of geometries) {
     const position = geometry.getAttribute('position');
-    const index = geometry.getIndex();
     if (!position) {
       throw new Error('mergeGeometries: a geometry is missing a position attribute.');
     }
@@ -442,70 +493,88 @@ export function mergeGeometries(geometries: readonly THREE.BufferGeometry[]): TH
           'Call computeVertexNormals() and ensure a UV layer exists.',
       );
     }
+
     vertexCount += position.count;
-    indexCount += index ? index.count : position.count;
+    indexCount += indicesLength(geometry);
   }
 
-  const positions = new Float32Array(vertexCount * 3);
-  const normals = new Float32Array(vertexCount * 3);
-  const uvs = new Float32Array(vertexCount * 2);
-  const colors = new Float32Array(vertexCount * 3);
-  const indices = new Uint32Array(indexCount);
-
-  let vertexOffset = 0;
-  let indexOffset = 0;
-
-  for (const geometry of geometries) {
-    const position = geometry.getAttribute('position');
-    const normal = geometry.getAttribute('normal');
-    const uv = geometry.getAttribute('uv');
-    const color = geometry.getAttribute('color');
-    const index = geometry.getIndex();
-
-    for (let i = 0; i < position.count; i++) {
-      const target = (vertexOffset + i) * 3;
-      positions[target + 0] = position.getX(i);
-      positions[target + 1] = position.getY(i);
-      positions[target + 2] = position.getZ(i);
-
-      normals[target + 0] = normal.getX(i);
-      normals[target + 1] = normal.getY(i);
-      normals[target + 2] = normal.getZ(i);
-
-      // Default to white when a source geometry has no vertex colours, so a merge
-      // never silently darkens a part.
-      colors[target + 0] = color ? color.getX(i) : 1;
-      colors[target + 1] = color ? color.getY(i) : 1;
-      colors[target + 2] = color ? color.getZ(i) : 1;
-
-      const uvTarget = (vertexOffset + i) * 2;
-      uvs[uvTarget + 0] = uv.getX(i);
-      uvs[uvTarget + 1] = uv.getY(i);
-    }
-
-    if (index) {
-      for (let i = 0; i < index.count; i++) {
-        indices[indexOffset + i] = index.getX(i) + vertexOffset;
-      }
-      indexOffset += index.count;
-    } else {
-      for (let i = 0; i < position.count; i++) {
-        indices[indexOffset + i] = vertexOffset + i;
-      }
-      indexOffset += position.count;
-    }
-
-    vertexOffset += position.count;
-  }
-
-  const merged = new THREE.BufferGeometry();
-  merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  merged.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  merged.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  merged.setIndex(new THREE.Float32BufferAttribute(indices, 1));
-  merged.computeBoundingSphere();
-  merged.computeBoundingBox();
-
-  return merged;
+  return { vertexCount, indexCount };
 }
+
+/**
+ * The number of indices a geometry contributes, treating an unindexed geometry as one index
+ * per vertex.
+ *
+ * @param geometry - The geometry to measure.
+ * @returns The index count.
+ */
+function indicesLength(geometry: THREE.BufferGeometry): number {
+  const position = geometry.getAttribute('position');
+  const index = geometry.getIndex();
+  // A non-null assertion is safe here: measureMergeInputs has already validated the presence
+  // of the position attribute, and this function is only called on validated geometry.
+  return index ? index.count : position.count;
+}
+
+/** The output arrays and current write cursors for a merge. */
+interface MergeTargets {
+  positions: Float32Array;
+  normals: Float32Array;
+  uvs: Float32Array;
+  colors: Float32Array;
+  indices: Uint32Array;
+  vertexOffset: number;
+  indexOffset: number;
+}
+
+/**
+ * Copy one geometry's vertex and index data into the output arrays at the current cursor.
+ *
+ * @param geometry - A geometry already validated by `measureMergeInputs`.
+ * @param targets - The output arrays and cursors. Cursors are read, not mutated.
+ * @returns The new vertex offset, advanced past this geometry's vertices.
+ */
+function appendGeometry(geometry: THREE.BufferGeometry, targets: MergeTargets): number {
+  const position = geometry.getAttribute('position');
+  const normal = geometry.getAttribute('normal');
+  const uv = geometry.getAttribute('uv');
+  const color = geometry.getAttribute('color');
+  const index = geometry.getIndex();
+  const { vertexOffset, indexOffset } = targets;
+
+  for (let i = 0; i < position.count; i++) {
+    const target = (vertexOffset + i) * 3;
+    targets.positions[target + 0] = position.getX(i);
+    targets.positions[target + 1] = position.getY(i);
+    targets.positions[target + 2] = position.getZ(i);
+
+    targets.normals[target + 0] = normal.getX(i);
+    targets.normals[target + 1] = normal.getY(i);
+    targets.normals[target + 2] = normal.getZ(i);
+
+    // Default to white when a source geometry has no vertex colours, so a merge never
+    // silently darkens a part.
+    targets.colors[target + 0] = color ? color.getX(i) : 1;
+    targets.colors[target + 1] = color ? color.getY(i) : 1;
+    targets.colors[target + 2] = color ? color.getZ(i) : 1;
+
+    const uvTarget = (vertexOffset + i) * 2;
+    targets.uvs[uvTarget + 0] = uv.getX(i);
+    targets.uvs[uvTarget + 1] = uv.getY(i);
+  }
+
+  if (index) {
+    for (let i = 0; i < index.count; i++) {
+      targets.indices[indexOffset + i] = index.getX(i) + vertexOffset;
+    }
+  } else {
+    // An unindexed geometry is given a trivial running index so the merged output is always
+    // indexed. Mixing indexed and unindexed geometry in one mesh is not representable.
+    for (let i = 0; i < position.count; i++) {
+      targets.indices[indexOffset + i] = vertexOffset + i;
+    }
+  }
+
+  return vertexOffset + position.count;
+}
+
