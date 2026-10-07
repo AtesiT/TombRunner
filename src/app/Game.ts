@@ -39,6 +39,7 @@ import { CharacterController } from '../gameplay/CharacterController';
 import { CharacterRig } from '../gameplay/CharacterRig';
 import { DebugOverlay, type OverlaySample } from './DebugOverlay';
 import { KeyboardSampler } from './KeyboardSampler';
+import { CameraRig } from '../gameplay/CameraRig';
 import { buildJungleLevel, type BuiltLevel, type LevelSummary } from '../world/LevelBuilder';
 
 /** Live performance counters, surfaced by the debug overlay. */
@@ -68,8 +69,16 @@ export class Game {
   private level: BuiltLevel | null = null;
   private physics: PhysicsWorld | null = null;
 
-  /** Camera orbit state for the Milestone 1.1 preview. Replaced in Milestone 1.2. */
+  /** Camera orbit state for the title-screen preview, before a character exists. */
   private orbitAngle = 0;
+
+  /**
+   * The camera rig, once a character exists.
+   *
+   * Named `cameraRig` rather than `rig` because `rig` is already the character's visual rig, and
+   * two fields called "the rig" in one class is a genuinely dangerous kind of ambiguity.
+   */
+  private cameraRig: CameraRig | null = null;
 
   /** The player, once a level exists. */
   private character: CharacterController | null = null;
@@ -89,15 +98,6 @@ export class Game {
     // it and the target resolution in the pipeline, so tuning rows alone keeps the grid square.
     snapGrid: (sharedUniforms.uSnapGrid.value as THREE.Vector2).y,
   };
-
-  /** Camera height above the player's body origin, in metres. */
-  private static readonly CAMERA_HEIGHT_M = 2.2;
-
-  /** Camera distance behind the player, in metres. */
-  private static readonly CAMERA_BACK_M = 4.2;
-
-  /** Over-the-shoulder lateral offset, per the GDD's 0.5 m spec. */
-  private static readonly SHOULDER_OFFSET_M = 0.5;
 
   /** The debug overlay's key handler, retained so it can be unbound on dispose. */
   private debugKeyHandler: ((event: KeyboardEvent) => void) | null = null;
@@ -182,16 +182,22 @@ export class Game {
 
     this.rig = new CharacterRig(this.level.scene, this.level.clothTexture);
 
-    this.input = new KeyboardSampler(window);
+    // The canvas is where pointer lock is requested, so the sampler needs it. Passing `window`
+    // for keys and the canvas for the lock is the whole of the input surface for this milestone.
+    this.input = new KeyboardSampler(window, this.renderer.domElement);
+
+    this.cameraRig = new CameraRig(physics);
+    // Snap rather than ease into position: the character spawns at a fixed point and a camera that
+    // flies in from wherever the constructor left it is a one-off flourish that only ever looks
+    // like a bug on reload.
+    this.cameraRig.snapTo(this.character.report.position, this.character.report.facingAngle);
 
     // The overlay is created last so its constructor cannot be blamed for a boot failure in
     // the character or the rig.
     this.overlay = new DebugOverlay(document.body, this.tunables);
     this.installDebugKeyBindings();
 
-    // Position the camera behind the player, facing the temple approach.
-    this.worldCamera.position.set(spawn.x, spawn.y + 2.2, spawn.z + 5);
-    this.worldCamera.lookAt(spawn.x, spawn.y + 1.2, spawn.z - 6);
+    this.applyCameraToRenderer();
 
     return this.level.summary;
   }
@@ -254,33 +260,76 @@ export class Game {
   }
 
   /**
-   * Place the camera behind and above the player, offset to the right for the over-shoulder
-   * framing the GDD specifies.
+   * Drive the camera rig for one tick and push the result onto the render camera.
    *
-   * This is a **placeholder** for the real spring-arm rig in Milestone 1.3, which adds the
-   * spring arm, the obstacle raycast, the minimum distance clamp, the follow and auto-rotate
-   * lerps and the aim FOV transition. It exists now only so the character can be watched while
-   * moving, and it deliberately does not attempt any of that rig's behaviour.
+   * Replaces the Milestone 1.1 placeholder, which positioned the camera behind the player with no
+   * occlusion test, no ground handling and no way for the player to look around. Everything the
+   * rig needs about the world — the probe radius, the layer list — it already holds; what it needs
+   * from gameplay is the set of situational flags that select the camera mode, and those are
+   * gathered here rather than inside the rig so the rig never has to reach into systems that do
+   * not exist yet.
    */
-  private updateFollowCamera(): void {
-    if (!this.character) return;
+  private updateCamera(): void {
+    if (!this.cameraRig || !this.character || !this.input) return;
 
     const report = this.character.report;
-    const facing = report.facingAngle;
 
-    // 0.5 m to the character's right, per the GDD's over-shoulder spec.
-    const rightX = Math.cos(facing);
-    const rightZ = -Math.sin(facing);
-    const backX = -Math.sin(facing);
-    const backZ = -Math.cos(facing);
-
-    const cameraY = report.position.y + Game.CAMERA_HEIGHT_M;
-    this.worldCamera.position.set(
-      report.position.x + backX * Game.CAMERA_BACK_M + rightX * Game.SHOULDER_OFFSET_M,
-      cameraY,
-      report.position.z + backZ * Game.CAMERA_BACK_M + rightZ * Game.SHOULDER_OFFSET_M,
+    this.cameraRig.update(
+      FIXED_DT,
+      report,
+      this.character.lastEvents,
+      this.input.drainLookDelta(),
+      this.cameraModeTriggers(),
     );
-    this.worldCamera.lookAt(report.position.x, report.position.y + 0.4, report.position.z);
+
+    this.applyCameraToRenderer();
+  }
+
+  /**
+   * The situational flags that select a camera mode.
+   *
+   * ─── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────────────
+   * Two of the four GDD conditions cannot be answered yet and are not guessed:
+   *
+   *   • **Submerged** needs the water volume system (Milestone 2.2). A `WaterVolume` layer exists
+   *     and nothing populates it, so there is no honest way to answer "is the camera underwater".
+   *   • **In a tunnel** needs a corridor volume, which is level-design data that does not exist
+   *     until the zones are built in Phase 3.
+   *   • **Cinematic** and **zipline** need their systems (Phases 2 and 3).
+   *
+   * They are omitted rather than stubbed with a plausible-looking distance test, because a wrong
+   * probe is worse than an absent one: it would switch the camera mode in ordinary play and there
+   * would be no reason to suspect the cause. The rig handles `undefined` for all of them and falls
+   * through to the correct lower-priority mode.
+   *
+   * `aiming` IS answerable — the aim button is a real key — but aiming itself is Milestone 2.1, and
+   * a mode that narrows the FOV with nothing to shoot is a worse preview than no mode at all. It
+   * is wired to the input binding and simply unreachable until the key exists.
+   */
+  private cameraModeTriggers(): Partial<import('../core/math/camera').CameraModeTriggers> {
+    return {};
+  }
+
+  /**
+   * Copy the rig's decision onto the renderer's camera.
+   *
+   * The FOV is set here rather than by the rig, because the rig deliberately knows nothing about
+   * THREE — it reports a number in degrees and the renderer decides what to do with it. That
+   * separation is what keeps the rig unit-testable without a WebGL context.
+   */
+  private applyCameraToRenderer(): void {
+    if (!this.cameraRig) return;
+
+    const state = this.cameraRig.current;
+    const target = this.cameraRig.lookTarget();
+
+    this.worldCamera.position.set(state.position.x, state.position.y, state.position.z);
+    this.worldCamera.lookAt(target.x, target.y, target.z);
+
+    if (Math.abs(this.worldCamera.fov - state.fovDeg) > 1e-3) {
+      this.worldCamera.fov = state.fovDeg;
+      this.worldCamera.updateProjectionMatrix();
+    }
   }
 
   /**
@@ -296,6 +345,7 @@ export class Game {
       ticksPerSecond: this.ticksPerSecond,
       frameStats: this.pipeline.stats,
       character: this.character ? this.character.report : null,
+      camera: this.cameraRig ? this.cameraRig.current : null,
       rescues: this.character ? this.character.rescues : 0,
       lastRescueReason: this.character ? this.character.lastRescueReason : '',
     };
@@ -409,14 +459,28 @@ export class Game {
     }
 
     this.physics?.step();
+
+    // ─── THE CAMERA TICKS HERE, NOT IN `render` ─────────────────────────────────────────
+    // This is the single most important placement decision in the camera's integration, and it is
+    // the opposite of where a camera "obviously" belongs. The camera advances its damping by `dt`
+    // and consumes a look delta that the input layer drains, so updating it once per *frame*
+    // would make both frame-rate dependent: at 144 Hz it would damp 2.4 times as fast as at 60,
+    // and every accumulated mouse delta would be split across a different number of ticks. The
+    // frame-rate independence proved in the camera tests would be quietly destroyed by the call
+    // site — the tests drive the rig directly and would still pass.
+    //
+    // It also has to run AFTER the physics step, so the pivot is the character's post-move
+    // position rather than the one it occupied when the tick began.
+    this.updateCamera();
   }
 
   /**
    * Render a frame.
    *
-   * @param alpha - Interpolation factor for the next tick, currently unused because the
-   *   only moving object is the camera. Threaded through so Milestone 1.2 can interpolate
-   *   without restructuring.
+   * @param alpha - Interpolation factor for the next tick. Unused, because every moving object
+   *   is either stepped at a fixed rate and read directly (the camera, the character) or is a
+   *   rigid body the physics step has already advanced. Threaded through so a future
+   *   render-interpolated pass can use it without restructuring this method's signature.
    */
   private render(alpha: number): void {
     if (!this.level) return;
@@ -424,7 +488,6 @@ export class Game {
     void alpha;
 
     if (this.character && this.rig) {
-      this.updateFollowCamera();
       this.rig.update(
         this.character.report,
         FIXED_DT,

@@ -171,6 +171,16 @@ export interface RaycastHit {
   colliderHandle: number;
 }
 
+/** The result of a {@link PhysicsWorld.castSphere} sweep. */
+export interface SphereCastHit {
+  /** Distance the sphere's CENTRE travelled before contact, in metres. */
+  distance: number;
+  /** Surface normal at the contact point, pointing away from the surface. */
+  normal: { x: number; y: number; z: number };
+  /** Handle of the collider that was hit. */
+  colliderHandle: number;
+}
+
 /** Description of a static collider to create. */
 export interface StaticColliderDescription {
   /** Shape to create. */
@@ -587,6 +597,79 @@ export class PhysicsWorld {
    * @param layers - Layers to test against.
    * @returns True if anything overlaps.
    */
+  /**
+   * Sweep a sphere from a point and report how far it travelled before touching anything.
+   *
+   * ─── WHY A SPHERE AND NOT A RAY ─────────────────────────────────────────────────────
+   * A ray can thread a gap that the camera's near plane cannot, and the result is geometry
+   * popping through the lens. A sphere of roughly the near plane's radius is the correct
+   * primitive.
+   *
+   * ─── THE SEMANTICS, AS MEASURED RATHER THAN ASSUMED ─────────────────────────────────
+   *   • `direction` is treated as a VELOCITY and `time_of_impact` is expressed in units of it.
+   *     This wrapper normalises the direction, which makes the returned distance a distance in
+   *     metres directly and removes a whole class of "pulls in to a tenth of the right length"
+   *     bugs. Measured: doubling the raw direction halves the raw toi.
+   *   • The sphere's RADIUS is honoured. Measured: against a slab whose face is 3 m away, a ray
+   *     reports 3.00 and a 0.25 m sphere reports 2.75.
+   *   • A miss beyond `maxDistance` returns null rather than clamping to a hit.
+   *   • `filterGroups` is the **9th** argument here, not the 5th as for `intersectionWithShape`.
+   *     Supplying collider-encoded groups silently matches nothing, so this method calls
+   *     `queryGroupsFor` internally and never accepts raw group values — it cannot be called
+   *     wrongly.
+   *
+   * @param origin - The sphere's centre at the start of the sweep.
+   * @param direction - The sweep direction. Normalised internally, so any magnitude works.
+   * @param radius - The sphere's radius in metres.
+   * @param maxDistance - How far to sweep before giving up, in metres.
+   * @param layers - Collision layers to test against.
+   * @returns The hit distance and surface normal, or null when nothing was touched.
+   */
+  public castSphere(
+    origin: { x: number; y: number; z: number },
+    direction: { x: number; y: number; z: number },
+    radius: number,
+    maxDistance: number,
+    layers?: readonly CollisionLayer[],
+  ): SphereCastHit | null {
+    const length = Math.hypot(direction.x, direction.y, direction.z);
+
+    // Degenerate inputs return null rather than throwing. A camera asking "is anything this way"
+    // with a zero direction is a bug, but crashing a frame loop is a worse outcome than a
+    // skipped query.
+    if (!Number.isFinite(length) || length < 1e-9) return null;
+    if (!Number.isFinite(radius) || radius <= 0) return null;
+    if (!Number.isFinite(maxDistance) || maxDistance <= 0) return null;
+
+    const sphere = new RAPIER.Ball(radius);
+    const unitDirection = {
+      x: direction.x / length,
+      y: direction.y / length,
+      z: direction.z / length,
+    };
+
+    const hit = this.world.castShape(
+      { x: origin.x, y: origin.y, z: origin.z },
+      // Identity rotation: the sweep is direction-driven, not spin-driven.
+      { x: 0, y: 0, z: 0, w: 1 },
+      unitDirection,
+      sphere,
+      0, // targetDistance: stop at first contact
+      maxDistance, // maxToi, in units of the unit direction above, so this is metres
+      true, // stopAtPenetration: an already-overlapping shape reports toi 0 rather than passing through
+      undefined, // default filter flags
+      layers ? queryGroupsFor(layers) : undefined,
+    );
+
+    if (!hit) return null;
+
+    return {
+      distance: hit.time_of_impact,
+      normal: { x: hit.normal1.x, y: hit.normal1.y, z: hit.normal1.z },
+      colliderHandle: hit.collider.handle,
+    };
+  }
+
   public sphereOverlaps(
     position: { x: number; y: number; z: number },
     radius: number,

@@ -6,6 +6,362 @@
 
 ---
 
+## 2026-10-07 (commit 5) — Milestone 1.3: The Camera Rig (IN PROGRESS)
+
+*Written before the code, per RULE #2. What I built, what broke, what I rejected and what I
+doubt will be filled in before the commit.*
+
+### Scope
+
+The GDD's camera section (5.1–5.4) is substantially richer than my earlier summary of it. It
+specifies not just a spring arm but a **contextual mode system with an explicit priority order**,
+a stuck detector, an asymmetric smoothing pair, a ground clamp with re-solve, and ten enumerated
+edge cases. I am implementing the mechanism in full, including modes whose triggers cannot fire
+yet, because the resolver is pure and testable regardless.
+
+| GDD §5.1 | Value |
+|---|---|
+| Shoulder offset | +0.50 m right (0.15 m while aiming) |
+| Distance | 4.0 m default |
+| Height | +1.45 m above the player origin |
+| Pitch range | −60° … +45°, asymmetric — the game is about looking *down* at footing |
+| FOV | 60° default → 45° aiming → 52° in corridors |
+| Follow damping | 0.10 positional, 0.15 rotational |
+| Auto-rotate | After 0.5 s idle, align behind the player's facing at 1.2 rad/s |
+
+| GDD §5.2 | Behaviour |
+|---|---|
+| Cast | Sphere of radius 0.25 from the head pivot, `STATIC_WORLD` only |
+| On hit | Place at `hit − skin(0.15)`, clamped to a 1.5 m minimum |
+| Asymmetric smoothing | Pull in at 0.35 (**correctness**), push out at 0.08 (**feel**) |
+| Ground clamp | `y ≥ groundY + 0.5`, then re-solve the arm |
+| Stuck detector | 2.0 s pinned at minimum, or 0.5 s inside geometry → 0.4 s interpolate to the fallback |
+
+### Implementation decisions
+
+**1. All camera mathematics goes in `src/core/math/camera.ts` and is unit-tested.**
+
+Same mandate as Milestone 1.1's shader maths and 1.2's jump maths: if it is a formula, it lives in
+a tested pure module and the class is glue. The camera particularly benefits, because its bugs are
+*feel* bugs — an off-by-one in a damping factor produces a camera that is subtly wrong rather than
+visibly broken, and nothing catches that except an assertion.
+
+**2. Two of the GDD's damping constants are specified as per-frame lerps, and per-frame lerps are
+frame-rate dependent. They will be converted to exponential rates.**
+
+The GDD says "lerp 0.10" and "pull-in at lerp 0.35". Read literally, that means
+`current += (target − current) × 0.10` once per frame. That produces a *different camera* at 144 Hz
+than at 60 Hz — a faster pull-in, a snappier follow — and on a machine that dips between the two
+it produces a camera whose damping changes mid-motion.
+
+The fix is the standard exponential form: `current += (target − current) × (1 − exp(−λ·dt))`, with
+λ derived from the authored per-frame factor at a reference rate so the GDD's *numbers* are still
+what a 60 Hz player experiences. The authored figures are honoured; only the interpretation becomes
+rate-independent. This is exactly the kind of quiet, unglamorous correctness that RULE #5's 60 FPS
+target actually depends on, and it is worth a dedicated test.
+
+**3. Asymmetric smoothing is not a nicety — the two directions have different jobs.**
+
+Pulling in must be *immediate*, because a frame spent clipping through a wall is a visible defect.
+Pushing out must be *slow*, because a camera that whips back the instant an obstruction clears is
+disorienting. Conflating them into one rate means either visible clipping (if tuned for feel) or a
+nauseating whip (if tuned for correctness). The GDD's 0.35/0.08 split is right and I am keeping it,
+translated into exponential rates.
+
+**4. The spring arm casts a sphere, not a ray.**
+
+`CAMERA_PROBE_RADIUS_M = 0.25` and the constant's own comment says why: a ray can pass through a
+gap that the near plane cannot, and the result is geometry popping through the lens. A sphere cast
+is the correct primitive. I will use Rapier's shape cast — with the argument-order trap from Phase 0
+in mind and the alternative (cast several rays through a disc) available if the semantics are not
+what I expect.
+
+**5. Mode transitions are lerped, never cut, and the priority order is resolved in one pure
+function.**
+
+`resolveCameraMode(triggers)` returns exactly one mode, so "ties are impossible by construction" as
+the GDD claims. Testing that claim means enumerating trigger combinations and asserting the winner,
+which is only possible because the resolver is pure.
+
+**6. Teleport detection comes from the controller's existing rescue event, not a distance
+heuristic.**
+
+The GDD requires that respawn *snaps* the camera rather than interpolating 60 m across the level. I
+already have an authoritative signal — `CharacterController.lastEvents.rescued` — which is set for
+exactly the cases that teleport the player (kill plane, NaN position, stuck watchdog). Using it
+rather than "position jumped more than N metres" means the two systems cannot disagree about what
+counted as a teleport, which is P1 from the last milestone in a different costume.
+
+The `setSpawnPoint` path can also move the player, so the rig *also* keeps a large-delta guard as a
+backstop — but the event is the primary signal, and the guard exists so that a future teleport path
+that forgets to raise the event degrades to a snap rather than to a nausea-inducing fly-through.
+
+### The eight edge cases this milestone must handle
+
+The GDD lists ten; two depend on systems that do not exist yet (a cutscene driver, and a death
+sequence from the combat milestone). I am implementing and testing the eight that are reachable,
+and recording the two deferrals explicitly rather than silently passing over them.
+
+1. **Camera never clips through geometry.** A wall between the player and the camera.
+2. **Camera never goes below the floor**, and the arm is re-solved after the clamp. Steep
+   down-look near the ground.
+3. **Teleport and respawn snap, never lerp.** A lerp across the level is genuinely nauseating.
+4. **A corner wedge forces a reset after 2.0 s.** The contained case where the arm is pinned and no
+   amount of smoothing gets the player out.
+5. **The asymmetric spring arm**, tested in both directions on the same obstruction appearing and
+   then clearing: fast in, slow out, and no oscillation against a flat wall.
+6. **The aim transition** — 60°→45° over 0.18 s, reversible mid-flight, interruptible, never
+   overshooting and never sticking part-way.
+7. **Pitch clamping** — never exceeds the asymmetric limits, and never flips over the pole where a
+   grazing angle would otherwise invert the view.
+8. **Auto-rotate never fights the player** — suspended while input arrives, beginning after exactly
+   0.5 s of idleness, and never rotating while a manual input is held.
+
+Plus one the GDD calls out as "a genuinely common reported bug in shipped games" and which is cheap
+to get right now: **9. the right-stick deadzone is applied before integration**, so a drifting
+stick cannot slowly rotate the camera. I am including it because "cheap now, impossible to debug
+later" is the whole argument for doing it here.
+
+### Deferred, and stated rather than glossed
+
+- **Cinematic mode** (GDD 5.3, 5.4 case 4) needs a story-beat driver, which is Milestone 3. The
+  *mode* and its priority are implemented and tested; only the trigger is absent.
+- **Death orbit** (GDD 5.4 case 9) needs a death sequence, which is Milestone 2's combat work.
+- **Water mode's screen tint** and the **narrow-corridor authored volumes** need the level to carry
+  those volumes, which is Milestone 3's level-and-narrative pass. The mode transitions themselves
+  are implemented; the triggers light up when the volumes exist.
+
+### Doubts carried in
+
+1. **I still cannot see this.** A camera is the single most *feel*-critical system in the project and
+   the least verifiable by assertion. I can prove it does not clip, does not flip and does not fight
+   the player. I cannot prove it feels good. This is now the fifth commit with that caveat and it is
+   the same caveat each time, which is itself information: the risk is not shrinking.
+2. **`CAMERA_PROBE_RADIUS_M = 0.25` is a guess.** Too small and geometry pokes through the near
+   plane; too large and the camera pulls in constantly in tight spaces, which feels claustrophobic.
+   Untested against real geometry.
+3. **Mouse sensitivity is unspecified in absolute terms** ("radians per pixel, raw"). I will pick a
+   value that corresponds to a plausible 360°-per-mouse-sweep and note it as unvalidated.
+4. **Mode transition durations are only specified for Aim (0.18 s).** The others will get the same
+   duration by default, which may be wrong for the larger climbs and zip-line framings — a 4 m to
+   5.5 m boom change in 0.18 s is fast.
+5. **The `lerp 0.10` conversion to λ is a judgement call about the reference rate.** I will use 60 Hz
+   because that is the simulation rate, and note that a player on a 144 Hz display with the naive
+   reading would have had a measurably different camera — the bug this decision avoids.
+
+### What I Built
+
+**1. `src/core/math/camera.ts` — the pure camera mathematics (83 unit tests).**
+
+Frame-rate-independent damping, the asymmetric spring arm, the pitch clamp, the orbit geometry,
+the mode-priority resolver, the mode framing table, auto-rotation, the stuck detector, the radial
+deadzone and the water wobble. Every one of these is a formula, so every one lives here rather than
+in the rig. The rig ended up thin as a result, which is the point.
+
+The single most valuable test in the file is the frame-rate one:
+
+```ts
+const oneBigStep   = damp(0, 100, rate, 2 / 60);
+const twoSmallSteps = damp(damp(0, 100, rate, 1 / 60), 100, rate, 1 / 60);
+expect(twoSmallSteps).toBeCloseTo(oneBigStep, 9);   // passes
+```
+
+The GDD's "lerp 0.10" read literally fails this badly: two frames close 19% of the gap, one closes
+10%. `dampRateFromPerFrameLerp(lerp, hz) = −hz·ln(1−lerp)` makes the authored number mean what a
+60 Hz player experiences while removing the frame-rate coupling entirely. `damp` also holds up over
+a sweep of rates and durations, so it is genuinely a semigroup rather than coincidentally right at
+one ratio.
+
+**2. `PhysicsWorld.castSphere()` — the swept-sphere query, and a characterisation test for it.**
+
+`castShape` takes `filterGroups` as its **9th** argument, not the 5th as `intersectionWithShape`
+does, and passing collider-encoded groups matches *nothing* — silently, with no error. Phase 0
+identified this trap and predicted it would be hit again. It very nearly was. So
+`test/characterisation/shape-cast-semantics.test.ts` (8 tests) pins the semantics by measurement
+before anything depends on them: the radius is honoured (a 0.25 m sphere stops at 2.75 m where a ray
+from the same origin stops at 3.00), the direction is a velocity so a unit vector makes
+`time_of_impact` metres, a miss past `maxDistance` returns `null` rather than clamping, and the two
+group encodings differ in their high 16 bits.
+
+`castSphere` normalises internally and calls `queryGroupsFor` itself, so it *cannot* be called
+wrongly — the encoding mistake is designed out rather than documented away.
+
+**3. `src/gameplay/CameraRig.ts` — the rig itself.**
+
+A 0.25 m sphere swept from a chest-height pivot. The boom shortens at 0.35/frame and lengthens at
+0.08/frame, chosen from target-versus-current rather than from "is something blocking us" (which
+judders). Ground correction re-solves the boom instead of lifting vertically. Auto-rotation gated on
+0.5 s of no camera input. Mode changes damped, never cut. Teleport snapping driven by
+`CharacterEvents.rescued`, with a distance backstop. A stuck detector with two independent
+conditions and an escape that provably converges.
+
+**4. Integration: `Game.updateCamera()` replaces the placeholder, and the camera ticks in
+`simulateTick`, not in `render`.**
+
+That placement is the least obvious decision in this commit and the most important. The camera
+advances damping by `dt` and drains a mouse delta the input layer accumulated. Updating it once per
+*frame* would make both frame-rate dependent — at 144 Hz it would damp 2.4× as fast as at 60, and
+every accumulated delta would be split across a different number of ticks. The frame-rate
+independence proved in the unit tests would be quietly destroyed by the call site, and **the tests
+would still pass**, because they drive the rig directly. The camera belongs where the simulation
+lives.
+
+**5. Mouse look in `KeyboardSampler`, and the camera line in the overlay.**
+
+Pointer lock on click, deltas accumulated and drained once per tick, discarded across the lock
+transition and on blur. The overlay now reports the camera's mode, FOV, boom, yaw, pitch and idle
+timer — because camera quality is impossible to judge from a screenshot and trivial to judge from
+those numbers while playing.
+
+### Problems Encountered
+
+Six real bugs in the production code, all found by tests, all fixed. Plus five errors in the tests
+themselves, which I am recording because a test that is wrong is worse than no test — it certifies
+the bug.
+
+**B1 — `damp()` froze the camera when asked to snap.** An unreachable defence clause:
+
+```ts
+if (!Number.isFinite(rate) || rate <= 0) return current;   // Infinity fails this; returned early
+...
+if (rate === Number.POSITIVE_INFINITY) return target;      // therefore unreachable, always was
+```
+
+`isFinite(Infinity)` is `false`, so the guard on the left caught the infinite rate first and the
+clause that handled it never ran. The published contract is that a lerp of 1.0 means "instant", so
+this is a real defect and not a theoretical one: any tunable set to instant would freeze the camera
+instead of snapping it. The fix moves the infinite test *above* the guard, which is where it must
+be, with a comment explaining that the ordering is load-bearing rather than stylistic. Found by a
+one-line unit test asserting "snaps exactly for an infinite rate".
+
+**B2 — the rig's look direction pointed backwards.** `lookTarget()` was reimplemented locally and
+used `orbitDirection` — which points from the pivot *out* to the camera — where the view direction
+requires its negation. The camera stared away from the player into the void.
+
+What makes this worth writing down is that **the test agreed with the bug.** I hand-expanded the
+expected vector in the test and made the same sign error, so rig and test were wrong together and
+the suite passed. The pure module was right the whole time. Two changes: the rig now *calls*
+`camera.ts`'s `lookTarget` rather than reimplementing it, and the test asserts against the module's
+own `orbitDirection` instead of a retyped formula, so the two have no room to be wrong in a matching
+way. My hand-expansion was also wrong in the *vertical* component, in the opposite direction, so the
+two errors partially cancelled — which is precisely why it survived.
+
+**B3 — the ground-clamp ray started a metre above the camera and found ceilings.** The `+1.0` was
+added on the reasoning that starting above an overhang would stop it hiding the floor. It did the
+opposite: the ray's origin landed *inside* the overhang, and Rapier reports a hit at zero distance
+for a solid ray starting inside a shape. So the ceiling became "the ground", the clamp lifted the
+camera into the ceiling, and the next tick found the ceiling's top face and lifted it further. In the
+sealed-pocket test the camera climbed to y = 4.52 and stayed inside the slab. Fix: cast downward from
+the camera's own height, which makes an overhang *structurally* unreachable because the ray never
+goes up.
+
+**B4 — the ground re-solve collapsed the boom to zero.** The re-solve fired whenever the camera was
+within the GDD's 0.5 m clearance of the surface below, and then searched for the boom length that
+satisfied it. At level pitch the camera's height does not depend on the boom length at all, so no
+distance satisfied it, the bisection returned the pivot itself, and the boom went to zero: a crate
+behind the player became a first-person view.
+
+Two problems with one line. First, 0.5 m is the *visual* clearance and far too strict a trigger for
+a framing correction — 0.42 m above a ledge is neither underground nor clipping, and 0.42 > 0.25 (the
+near-plane sphere) so nothing is wrong at all. Second, and more fundamentally, **re-solving the boom
+can only raise the camera when the arm points downward.** Fix: attempt the re-solve only when
+`pitch < 0`, decline a result that would cost more than half the boom, and let the absolute clamp
+guarantee the clearance. The re-solve is now a framing nicety rather than the safety mechanism, which
+is the reverse of the first draft's arrangement and the reason the first draft could place the camera
+underground.
+
+**B5 — the escape hatch drove the camera deeper into the wall.** The reset drove the boom to a
+"fallback" of 60% of the full distance, on the reasoning that the obstruction cast could not be
+trusted while stuck. Wrong twice over: the cast was never the problem, and pushing the boom *out* is
+the wrong direction in a tight space. The pocket test caught it — the camera ended up penetrating
+geometry *after* the escape had run, which is the one outcome the escape exists to prevent.
+
+The real obstacle is the 1.5 m minimum. It exists so the player never sees the back of their own
+head, which is a *bad view*; in a pocket smaller than the minimum there is no legal position at all,
+so enforcing it produces **no** view. The escape now relaxes the minimum to 4% and lets the arm
+collapse toward the pivot — which is the one point guaranteed to be inside free space, because the
+character is standing there. That makes the escape provably convergent rather than hopeful.
+
+**B6 — the escape ended on a countdown instead of on relief, and the camera juddered forever.** With
+`CAMERA_RESET_S` as a duration and a countdown that expired regardless, the escape ended while the
+camera was *still* inside geometry, restoring the normal minimum, pushing the camera straight back
+into the wall and re-arming the detector. A ~2.5 s cycle, forever. 0.4 s is how long the arm takes to
+*collapse*, not how long the escape lasts. The escape is now a state that ends when its cause is
+gone. If the geometry admits no valid position it stays active permanently, and that is correct.
+
+**B7 — `springArmTarget`'s minimum could override an obstruction, putting the camera inside the
+wall.** Against a wall 1.25 m away the arm resolved to the 1.5 m minimum and the camera was placed a
+quarter of a metre *inside* the wall. The minimum is a framing *preference*; not being inside geometry
+is a *constraint*, and a preference must never override one. The rig now caps the floor it hands the
+resolver at what the geometry actually permits, and lets the pinned detector bring in the escape when
+the resulting view has fallen below spec.
+
+**B8 — `snapTo`'s pivot had two meanings for two callers.** The public path passed feet height; the
+teleport path passed chest height. The result was a first-frame-only bug: the very first solve ran at
+the character's knees, sailed through a wall, and then behaved correctly forever after. Fixing the ray
+origin in B3 exposed it. One entry point, one meaning, and `snapTo` now takes the character's own
+position and applies the lift itself.
+
+**Five test errors, recorded because a wrong test certifies its bug.**
+
+| # | Error | Why it certified nothing |
+|---|---|---|
+| T1 | Compared *progress* on the spring-arm asymmetry and demanded pull-in be 2× faster | Progress is capped at 1.0, and pull-in saturates in 10 ticks, so the assertion became unsatisfiable arithmetically. Fixed by measuring the gap *remaining* |
+| T2 | Asserted `expandingRemaining < contractingRemaining` | Inverted. The quantity compared was the gap *remaining*, so push-out — the slower direction — legitimately leaves more of it. Fixed by asserting the direction the maths actually supports |
+| T3 | Bounded the reversing FOV step at 2° | An arbitrary budget that fitted today's constants. Replaced with the property that actually holds: the step is the authored fraction of the gap |
+| T4 | Used the literal `0.7071` for `SQRT1_2` | Left the diagonal magnitude at 0.44999, and the resulting 6e-5 mismatch looked like a radial-blend bug. Fixed with `Math.SQRT1_2`, keeping the assertion tight rather than loosening it until the symptom vanished |
+| T5 | Required "not penetrating" inside a *sealed* pocket | Unachievable — a 3 m box with 0.5 m walls admits no camera position that satisfies a 1.5 m minimum. The test was demanding something impossible and would have passed only if the camera escaped into the void. Rewritten to assert the guarantee that *can* be made: no NaN, still on a legal boom, not inside geometry |
+
+**A process error I want on the record.** While planning this milestone I computed the required
+launch speeds for a 3 m and 6 m jump, concluded the constants were mistuned in both directions, and
+began writing an entry about it before checking the file. The constants were already correct and
+already documented — `JUMP_STANDING_SPEED_MPS = 3.913`, `JUMP_RUNNING_SPEED_MPS = 7.0588`, solved
+against the hold-scaled and discrete-compensated arc during Milestone 1.2. I had invented the numbers
+I was reasoning about and nearly logged a fix for a bug that did not exist. **Read the file before
+asserting the file is wrong.** Since this same class of mistake — asserting on remembered rather than
+read values — has now appeared three times in this project, it goes in the register as a named
+failure mode rather than a shrug.
+
+### Alternatives Considered and Rejected
+
+| Alternative | Why rejected |
+|---|---|
+| A raycast instead of a sphere cast | A ray threads gaps the near plane cannot, and geometry pops through the lens. The 0.25 m sphere stops the boom where the near plane is — measured at 2.75 m against a face a ray calls 3.00 m |
+| One damping rate for both directions | Forces a choice between visible clipping on the way in and a nauseating whip on the way out. Two genuinely different requirements on the same number |
+| Lifting the camera's Y when the ground is too close | The camera leaves the boom axis, so the framing shifts sideways and the view drifts for as long as the player walks downhill |
+| Detecting teleports by distance alone | Makes a legitimate fast fall — or a zip line, or a launched platform — snap the camera mid-parkour. `rescued` is authoritative; the distance is only a backstop |
+| Damping the pivot so the camera eases toward the character | The camera would visibly lag the character's *own body*, so a player who stops would watch the camera keep sliding toward them |
+| A wall-clock phase for the water wobble | A stalled tab would teleport the phase, and the oscillation would run at a rate that depends on when the tab was resumed |
+| Folding the water wobble into the stored yaw | It *accumulates*. The camera drifts by whatever the oscillation summed to and surfaces pointing somewhere subtly random — unreproducible and undescribable |
+| Skipping the obstruction cast entirely during a reset | B5. The cast was never the problem; the minimum distance was |
+| Relaxing the minimum only, without raising the pivot | Fixes penetration but does nothing for a camera merely *pinned* against a wall. Pulling such a camera in further just buries it in the character's back |
+| Stubbing the submerged and tunnel probes with a plausible distance test | A wrong probe switches camera modes in ordinary play and gives no reason to suspect the cause. Absent is better than wrong; the rig handles `undefined` and falls through to the correct lower-priority mode |
+
+### Doubts
+
+| # | Doubt | How it gets resolved |
+|---|---|---|
+| Q1 | **Nothing has been rendered in five commits.** The probe radius, the mouse sensitivity, the 0.18 s mode transition and whether 0.35/0.08 reads as smooth or as sluggish are all unvalidated | Manual checklist in the live preview. This is the honest answer and it has been the honest answer since commit 1 — but it is now the *only* thing standing between the camera and "done" |
+| Q2 | `CAMERA_MODE_TRANSITION_RATE = 12.8` /s is derived from 90% of the Aim transition in 0.18 s, and the GDD specifies 0.18 s only for Aim. Climb, mantle and zip-line inherit it | Judge in motion. A single rate for every mode is almost certainly wrong for at least one of them, but the GDD gives no basis for four separate ones |
+| Q3 | The escape can stay *permanently* active in geometry that admits no spec-compliant camera, and the player sees a raised pivot with no explanation for why | Playtest. Alternatives are worse — the state it replaces is a 2.5 s judder loop |
+| Q4 | `pinned` is compared against the *normal* minimum, so any boom legitimately below 1.5 m keeps the escape on indefinitely | Playtest a corridor network. Requires level geometry that does not exist until Phase 3 |
+| Q5 | Mouse sensitivity 0.0022 rad/px is a guess with no basis whatsoever | Feel. It is one constant in one place, chosen so it can be changed once rather than argued about now |
+| Q6 | The re-solve's "decline a result costing more than half the boom" threshold is 0.5 because it looks reasonable | Playtest against slopes. A principled threshold would come from screen-space framing error, which needs a renderer |
+| Q7 | `snapTo` ticks the rig with `dt = 0`, which skips damping entirely by design. It is exercised on boot and on every rescue, and both paths are tested — but the teleport *backstop* has never fired in real play | Artificial test (`injectPositionForTest`). Real play produces no teleports |
+
+### Next Steps
+
+1. **Manual feel checklist in the live preview** — the eight edge cases where they are observable
+   (back into a wall, walk downhill, back into a rising ledge, aim, get pinned), plus the draw call
+   and frame-time numbers the overlay now reports.
+2. **Milestone 1.4: the real input layer** — gamepad, the input-level 150/200/100 ms buffers,
+   `localStorage` remapping, sensitivity as a tunable, and `KeyboardSampler` retired as the
+   temporary adapter it declares itself to be. `drainLookDelta()` is already the interface it needs.
+3. **Then Phase 2**, starting with combat, which is the first system that needs the camera's aim
+   mode to actually mean something.
+
+
+
 ## 2026-10-07 (commit 4) — Milestone 1.2: Procedural Rig, Dev Overlay, and a Playable Preview
 
 **Milestone 1.2 is complete.** The character is now visible, driveable and instrumented in the
@@ -801,6 +1157,13 @@ Finding the trigger was not enough to act on, because "always prime the world" i
 ---
 
 ### Known Engine Quirks (cumulative register)
+
+> **Process register — added commit 5.** "Asserting on remembered rather than read values."
+> Observed three times: the platform-momentum patch (searched for a string that had already changed),
+> the README controls table, and the jump constants above. In all three cases the *fix* was described
+> in detail before the file was opened. The rule that comes out of it: **when a claim is about a value,
+> quote the value from the file in the same command that acts on it.** Reasoning about numbers you
+> did not read is not reasoning, it is guessing with confidence.
 
 Required by `ARCHITECTURE.md` §W2. Every entry cites the experiment that justifies the guard.
 

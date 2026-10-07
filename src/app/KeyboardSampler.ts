@@ -23,12 +23,25 @@
  *     Milestone 1.4 must own this properly rather than relying on that.
  *   • **No buffers.** Buffering is implemented downstream in the controller for coyote time;
  *     the input-level buffers the GDD specifies are a separate mechanism.
- *   • **No remapping, no gamepad, no mouse aim.** Fixed bindings only.
+ *   • **No remapping and no gamepad.** Fixed bindings only. Mouse look IS implemented (the
+ *     camera in Milestone 1.3 needs it and would otherwise be untestable by feel), but pointer
+ *     lock, sensitivity, Y-inversion and zoom are all Milestone 1.4's.
  *   • **No deadzone or analogue handling.** The stick case does not exist yet, so every
  *     magnitude is 0, 0.5 or 1.
  *
  * A reader who finds this file and wonders why input is so thin should read the paragraphs
  * above rather than assume it was an oversight. The DEV_LOG records the deferral too.
+ *
+ * ─── MOUSE LOOK: WHY IT LIVES HERE, AND WHY IT IS DELIBERATELY CRUDE ────────────────
+ * The camera rig consumes a per-tick yaw and pitch DELTA in radians, and it must consume whole
+ * deltas rather than a position: accumulating raw pixel counts inside the rig would make the
+ * camera's response depend on how the browser batched `mousemove` events, which is exactly the
+ * kind of frame-rate coupling the whole camera design rejects.
+ *
+ * So the deltas are accumulated here, in the sampler, and drained once per tick. Pixel counts
+ * become radians with a fixed sensitivity; the deadzone, the sensitivity slider, the invert-Y
+ * option and the "ignore motion while pointer lock is being acquired" case are all Milestone
+ * 1.4's, and none of them change any interface.
  */
 
 import type { CharacterIntent } from '../gameplay/LocomotionStates';
@@ -78,19 +91,103 @@ export class KeyboardSampler {
    */
   private readonly onBlur = (): void => {
     this.held.clear();
+    // Also drop any pending look. Alt-tabbing away and back must not deliver the mouse movement
+    // from the window-switch as a camera swing.
+    this.pendingYaw = 0;
+    this.pendingPitch = 0;
   };
 
   /** The most recent key-press tick, per binding, for edge detection. */
   private previousJump = false;
   private previousInteract = false;
 
+  /** Radians of camera rotation per pixel of mouse movement. */
+  private static readonly MOUSE_SENSITIVITY = 0.0022;
+
+  /**
+   * Accumulated look delta, in radians, drained once per tick.
+   *
+   * Deliberately accumulated rather than a "latest value": a fast flick generates several
+   * `mousemove` events between two frames, and keeping only the last one would silently discard
+   * most of the movement, so the camera would feel like it was dropping input on fast turns.
+   */
+  private pendingYaw = 0;
+  private pendingPitch = 0;
+
+  /** Whether the pointer is locked. Look input is ignored until it is. */
+  private pointerLocked = false;
+
+  private readonly onMouseMove = (event: MouseEvent): void => {
+    // Ignore movement when the pointer is not locked. Without this, merely moving the mouse
+    // across the page turns the camera, which makes the preview unusable before the player has
+    // clicked anything.
+    if (!this.pointerLocked) return;
+
+    this.pendingYaw += event.movementX * KeyboardSampler.MOUSE_SENSITIVITY;
+    // Screen Y grows downward and pitch grows upward, so the sign inverts. This is also the point
+    // a "invert Y" option would flip, which is why the negation is on its own line.
+    this.pendingPitch -= event.movementY * KeyboardSampler.MOUSE_SENSITIVITY;
+  };
+
+  private readonly onPointerLockChange = (): void => {
+    const wasLocked = this.pointerLocked;
+    this.pointerLocked = document.pointerLockElement !== null;
+
+    // Discard whatever accumulated across the lock transition. Without this, the first frame after
+    // locking applies every pixel of movement from acquiring the lock — and acquiring a lock
+    // typically involves a large, fast mouse movement toward the canvas.
+    if (!wasLocked && this.pointerLocked) {
+      this.pendingYaw = 0;
+      this.pendingPitch = 0;
+    }
+  };
+
+  private readonly onClick = (): void => {
+    // Requesting a lock that is already held is a no-op that some browsers log a warning for.
+    if (!this.pointerLocked) {
+      void this.canvas.requestPointerLock();
+    }
+  };
+
   /**
    * @param target - The element to listen on. Usually `window`.
    */
-  constructor(private readonly target: Window) {
+  /**
+   * @param target - The window to listen on for keys.
+   * @param canvas - The element pointer lock is requested on. Clicking it captures the mouse.
+   */
+  constructor(
+    private readonly target: Window,
+    private readonly canvas: HTMLElement,
+  ) {
     target.addEventListener('keydown', this.onKeyDown);
     target.addEventListener('keyup', this.onKeyUp);
     target.addEventListener('blur', this.onBlur);
+    target.addEventListener('mousemove', this.onMouseMove);
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    canvas.addEventListener('click', this.onClick);
+  }
+
+  /**
+   * Take this tick's camera look delta, in radians, and reset the accumulator.
+   *
+   * Drained rather than read, so a tick consumes exactly the movement that happened since the
+   * previous tick and no movement is applied twice. Two calls in one tick return a zero delta the
+   * second time, which is the correct behaviour: there is no new input.
+   *
+   * @returns The look delta for this tick.
+   */
+  public drainLookDelta(): { yawDelta: number; pitchDelta: number } {
+    const yawDelta = this.pendingYaw;
+    const pitchDelta = this.pendingPitch;
+    this.pendingYaw = 0;
+    this.pendingPitch = 0;
+    return { yawDelta, pitchDelta };
+  }
+
+  /** Whether the pointer is currently locked, so the UI can prompt the player to click. */
+  public get isPointerLocked(): boolean {
+    return this.pointerLocked;
   }
 
   /**
@@ -142,6 +239,9 @@ export class KeyboardSampler {
     this.target.removeEventListener('keydown', this.onKeyDown);
     this.target.removeEventListener('keyup', this.onKeyUp);
     this.target.removeEventListener('blur', this.onBlur);
+    this.target.removeEventListener('mousemove', this.onMouseMove);
+    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    this.canvas.removeEventListener('click', this.onClick);
     this.held.clear();
   }
 

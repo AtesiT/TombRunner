@@ -448,6 +448,71 @@ export const CAMERA_RESET_DURATION_S = 0.4;
 /** Camera ground clamp offset. Uses the true resting height, not half-height + radius. */
 export const CAMERA_GROUND_CLEARANCE_M = 0.5;
 
+/** Clearance subtracted from a collision probe, so the camera sits just off the surface. */
+export const CAMERA_SKIN_M = 0.15;
+
+/** Rate at which aim and other mode framings transition. GDD specifies 0.18 s for Aim. */
+export const CAMERA_MODE_TRANSITION_RATE = 12.8;
+
+/** Extra pitch while climbing, so the player looks up the wall they are on rather than at it. */
+export const CAMERA_CLIMB_PITCH_BIAS_DEG = 10;
+
+/** Pitch bias on a zip line: look ahead and down at the destination. */
+export const CAMERA_ZIPLINE_PITCH_BIAS_DEG = -8;
+
+/** Extra boom length during a mantle, to keep the whole body in frame. */
+export const CAMERA_MANTLE_PULL_BACK_M = 0.8;
+
+/** Extra pivot height during a mantle. */
+export const CAMERA_MANTLE_RAISE_M = 0.3;
+
+/** Peak positional wobble in radians while submerged. */
+export const CAMERA_WATER_WOBBLE_RAD = 0.05;
+
+/** Frequency of the submerged wobble, in Hz. */
+export const CAMERA_WATER_WOBBLE_HZ = 0.6;
+
+/** Radial deadzone for the right stick, applied BEFORE integration. */
+export const CAMERA_STICK_DEADZONE = 0.15;
+
+/** How far ahead of the camera the look target sits, in metres. Any positive value gives the
+ * same orientation; this only needs to be comfortably non-zero. */
+export const CAMERA_LOOK_AHEAD_M = 1.0;
+
+/**
+ * The boom length the forced reset may collapse to, as a fraction of the normal minimum.
+ *
+ * ─── WHY THE MINIMUM IS ALLOWED TO MOVE AT ALL ──────────────────────────────────────
+ * `CAMERA_MIN_DISTANCE_M` exists because a camera closer than 1.5 m to the pivot shows the back
+ * of the character's head and nothing else — a bad view, but a *view*. That trade stops being
+ * correct when there is no legal position at all: in a niche, a narrow cave mouth or a sealed
+ * pocket, every distance down to the minimum is inside geometry, so the minimum is not protecting
+ * the player from a bad view, it is *causing* an unusable one. The reset therefore relaxes it.
+ *
+ * This is the difference between an escape hatch and a gesture at one.
+ */
+export const CAMERA_RESET_MIN_SCALE = 0.04;
+
+/**
+ * How far the forced reset raises the pivot, in metres.
+ *
+ * Addresses the *other* half of being stuck. Relaxing the minimum distance fixes a camera that is
+ * inside geometry, but it does nothing for a camera that is pinned at minimum distance and merely
+ * pressed against a wall — a corridor, a doorway, the inside of a chimney. Pulling such a camera
+ * in further just buries it in the character's back.
+ *
+ * Raising the pivot instead converts the view into a downward look over the character's own
+ * shoulder, which is always informative: the player sees the character, the floor they are
+ * standing on, and the space immediately around them. That is the view that gets them unstuck.
+ */
+export const CAMERA_RESET_LIFT_M = 0.6;
+
+/** Duration of the forced camera reset when the stuck detector fires, in seconds. */
+export const CAMERA_RESET_S = 0.4;
+
+/** Distance the camera may lag the player before it is treated as a teleport and snaps. */
+export const CAMERA_TELEPORT_SNAP_M = 8.0;
+
 /** Pitch limits. Asymmetric: the game is about looking down at footing. */
 export const CAMERA_PITCH_MIN_DEG = -60;
 export const CAMERA_PITCH_MAX_DEG = 45;

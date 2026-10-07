@@ -36,6 +36,9 @@ or in a container.
 
 | Input | Action |
 |---|---|
+| **Click the canvas** | Capture the mouse. Camera look is ignored until you do. |
+| Mouse | Look. Left/right orbits, up/down pitches within −60°…+45° |
+| `Esc` | Release the mouse |
 | `W` `A` `S` `D` | Move (the character turns toward the direction, so movement arcs) |
 | `Shift` | Run (6 m/s) instead of walk (2 m/s) |
 | `Space` | Jump — tap for a low hop, hold for the full height |
@@ -50,8 +53,25 @@ animation clips. The gait actually advances by **distance travelled** rather tha
 is what stops the feet skating, and the slope lean is driven by the ground normal, so the
 character leans correctly into a 17° ramp no one authored a clip for.
 
-The camera here is a deliberate **placeholder** for Milestone 1.3's spring-arm rig. It follows
-behind and over the shoulder but does not yet raycast against geometry.
+The camera is a full over-the-shoulder **spring-arm rig**. A 0.25 m sphere is swept from a
+chest-height pivot outward every tick, so the boom shortens against walls faster than it
+lengthens back (0.35 vs 0.08 per frame) — pulling in is a correctness problem, pushing out is
+only a feel problem, and conflating the two forces a choice between visible clipping and a
+nauseating whip. The camera re-solves its boom against rising ground rather than lifting
+vertically, which keeps it on the arm and stops the framing shifting sideways as you walk
+downhill. If it is ever pinned or inside geometry for long enough it enters an **escape**: the
+boom is allowed below its normal 1.5 m minimum and the pivot is raised 0.6 m, which converges on
+a close downward view, because the one place guaranteed to be free of geometry is where the
+character is standing.
+
+Two of the camera's design decisions are worth knowing while playing:
+
+* **Auto-rotation waits 0.5 s of no camera input** before easing the yaw back behind you. This is
+  the single most-complained-about third-person camera behaviour there is — the camera rotating
+  while you hold forward, so your path curves and you cannot tell why — and the only thing that
+  reliably distinguishes "idle" from "being steered" is a duration.
+* **Aiming narrows the FOV from 60° to 45° over about 0.18 s** and centres the shoulder offset.
+  The transition is damped, never cut, so the horizon never jumps.
 
 The overlay exists because appearance cannot be judged from a test suite. It reports frame time
 mean and p95, draw calls, triangle count, the full controller state, and live shader tunables —
@@ -100,7 +120,7 @@ This is an adventure, not a horror game.
 npm test
 ```
 
-Seven suites, 190 tests, all running headlessly in Node:
+Ten suites, 305 tests, all running headlessly in Node:
 
 | Suite | Covers | Count |
 |---|---|---:|
@@ -111,7 +131,10 @@ Seven suites, 190 tests, all running headlessly in Node:
 | `test/unit/shader-uniforms.test.ts` | Shader/JS uniform agreement, GLSL ES 1.00 compatibility lint, FOV conversion | 17 |
 | `test/integration/character-controller.test.ts` | Real Rapier: the **ten mandatory edge cases**, moving-platform carry, safety nets, determinism | 25 |
 | `test/integration/level-build.test.ts` | Builds the real level and lands a real character on the generated terrain | 5 |
-| **Total** | | **190** |
+| `test/characterisation/shape-cast-semantics.test.ts` | Pins Rapier's swept-sphere semantics: radius honoured, direction normalised, `filterGroups` is the **9th** argument | 8 |
+| `test/unit/camera.test.ts` | Camera maths: frame-rate independence, the asymmetric spring arm, mode priority, the deadzone's continuity at its threshold | 83 |
+| `test/integration/camera-rig.test.ts` | Real Rapier: the **eight mandatory camera edge cases**, plus 30 Hz landing where 60 Hz lands | 24 |
+| **Total** | | **305** |
 
 The jump distances the level design is authored against are asserted numerically: a standing
 jump clears **2.997 m** at a **2.000 m** peak, and a full-speed running jump clears **6.109 m**

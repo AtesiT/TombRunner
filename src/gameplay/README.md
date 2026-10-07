@@ -151,6 +151,8 @@ actual dimensions instead.
 | `GroundProbe.ts` | The five-ray cone, majority vote, averaged normal, edge proximity | `test/integration/character-controller.test.ts` |
 | `CharacterController.ts` | Owns velocity and state, integrates, drives the Rapier body | `test/integration/character-controller.test.ts` (25) |
 | `../core/math/locomotion.ts` | All jump, slope, turning and window mathematics | `test/unit/locomotion.test.ts` (52) |
+| `CameraRig.ts` | The spring arm: orbit state, occlusion sphere, ground re-solve, stuck detector, mode blending | `test/integration/camera-rig.test.ts` (24) |
+| `../core/math/camera.ts` | All camera mathematics — damping, the asymmetric arm, mode priority and framing, deadzone, wobble | `test/unit/camera.test.ts` (83) |
 
 `CharacterController` is deliberately mostly **glue**: probe, resolve, integrate, hand the result
 to Rapier. The decisions live in the modules above it, which is precisely what makes them testable
@@ -181,6 +183,46 @@ Three orderings are load-bearing, and two of them were wrong in the first draft:
   cleans up velocity the character *inherited*, so it must run before any new impulse.
 - **Windows advance last**, so every consumer reads them at their current value. Advancing a
   window before its consumers would silently shorten every forgiveness window by one tick.
+
+---
+
+## The camera: a spring arm is a collection of interaction effects
+
+The camera follows the same split as the controller — `CameraRig.ts` is state and sequencing,
+`core/math/camera.ts` is every decision — and the reason is worth stating because a camera looks
+like an exception. It has no entity, no collision response and no failure to speak of. What it has
+instead is *feel*, and feel bugs are the class that no assertion catches by accident.
+
+Three of the rig's decisions are non-obvious enough to be worth the words:
+
+**The spring arm's two rates are chosen from target-versus-current, not from "is something blocking
+us".** The direction test sounds equivalent and is not: an arm still easing outward past a
+now-present obstruction would keep re-deciding that it is obstructed and judder against it. Deciding
+by which way the boom needs to move is the only test that cannot oscillate.
+
+**Ground correction re-solves the boom; it does not lift the camera.** Re-solving keeps the camera
+on the arm, so walking downhill does not shift the framing sideways. But re-solving *can only raise
+the camera when the arm points downward* — at a level pitch the camera's height is independent of
+the boom length, so there is no length to find. The re-solve therefore runs only at `pitch < 0`, and
+the absolute clamp guarantees the clearance in every other case. The first draft had this backwards
+and collapsed the boom to zero whenever a crate sat behind the player.
+
+**The escape hatch relaxes the spec rather than searching harder within it.** When the stuck detector
+fires, the 1.5 m minimum distance is scaled to 4% and the pivot rises 0.6 m. The minimum exists so the
+player never sees the back of their own head, which is a *bad view*; inside a pocket smaller than the
+minimum there is no legal position at all, so enforcing it produces no view. Relaxing it lets the arm
+collapse toward the pivot — the one point guaranteed to be inside free space, because the character is
+standing there — which makes the escape provably convergent instead of hopeful.
+
+### What the camera tests do not cover
+
+The same honest gap as everywhere else in this project, sharpened. `test/integration/camera-rig.test.ts`
+proves the *positions and rates*: the arm pulls in against a wall and never crosses it, the boom
+shortens faster than it lengthens, the escape reaches clear space from a sealed pocket, a teleport
+snaps in one tick, and 30 Hz lands where 60 Hz lands. What it cannot prove is whether any of it
+**feels** right — and for a camera, feel is most of the value. Probe radius, mouse sensitivity, and the
+0.18 s mode transition are all unvalidated guesses. They are listed in the DEV_LOG's doubts table with
+the checklist that would resolve each.
 
 ---
 

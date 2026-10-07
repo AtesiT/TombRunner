@@ -32,6 +32,7 @@
  */
 
 import type { CharacterTickReport } from '../gameplay/CharacterController';
+import type { CameraState } from '../gameplay/CameraRig';
 import type { FrameStats } from '../render/PS1Pipeline';
 
 /** Everything the overlay can display. Gathered by the caller and formatted here. */
@@ -52,6 +53,8 @@ export interface OverlaySample {
   rescues: number;
   /** Why the safety net last fired. */
   lastRescueReason: string;
+  /** The camera rig's state, or null before a camera exists. */
+  camera: Readonly<CameraState> | null;
 }
 
 /** Live-editable values, so tuning happens by looking rather than by guessing. */
@@ -74,6 +77,7 @@ export class DebugOverlay {
   private readonly perfLine: HTMLDivElement;
   private readonly renderLine: HTMLDivElement;
   private readonly characterLine: HTMLDivElement;
+  private readonly cameraLine: HTMLDivElement;
   private readonly tuningLine: HTMLDivElement;
 
   private visible = false;
@@ -109,11 +113,18 @@ export class DebugOverlay {
 
     this.perfLine = document.createElement('div');
     this.renderLine = document.createElement('div');
+    this.cameraLine = document.createElement('div');
     this.characterLine = document.createElement('div');
     this.tuningLine = document.createElement('div');
     this.tuningLine.style.cssText = 'color:#f0d8a0;margin-top:4px';
 
-    this.root.append(this.perfLine, this.renderLine, this.characterLine, this.tuningLine);
+    this.root.append(
+      this.perfLine,
+      this.renderLine,
+      this.characterLine,
+      this.cameraLine,
+      this.tuningLine,
+    );
     parent.appendChild(this.root);
   }
 
@@ -169,6 +180,7 @@ export class DebugOverlay {
     this.writePerf(sample);
     this.writeRender(sample.frameStats);
     this.writeCharacter(sample.character, sample.rescues, sample.lastRescueReason);
+    this.writeCamera(sample.camera);
     this.writeTuning();
   }
 
@@ -231,6 +243,40 @@ export class DebugOverlay {
       // Rescues should be zero in normal play. A non-zero count with a reason is the clearest
       // possible signal that something is wrong with the level or the controller.
       `${rescues > 0 ? `\nRESCUES ${rescues}  last: ${lastRescueReason}` : ''}`;
+  }
+
+  /**
+   * Write the camera rig's state.
+   *
+   * ─── WHY THE CAMERA GETS ITS OWN LINE ────────────────────────────────────────────────
+   * Camera quality is the hardest thing in this project to judge from a screenshot and the
+   * easiest to judge from these few numbers while playing. A `boom` swinging wildly means the
+   * occlusion resolving is too eager; `idle` never rising means the camera is being treated as
+   * permanently steered, so auto-rotation will never engage; `ESCAPING` appearing in ordinary play
+   * means the stuck detector is misfiring, which is a worse bug than the one it exists to fix.
+   *
+   * `fov` and `mode` are here because the mode table is only ever verifiable by watching it change.
+   *
+   * @param camera - The rig's state, or null before a camera exists.
+   */
+  private writeCamera(camera: Readonly<CameraState> | null): void {
+    if (!camera) {
+      this.cameraLine.textContent = 'camera: none';
+      return;
+    }
+
+    const position = camera.position;
+    const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(0);
+
+    this.cameraLine.textContent =
+      `camera ${camera.mode}  fov ${camera.fovDeg.toFixed(0)}  boom ${camera.boom.toFixed(2)} m` +
+      `${camera.obstructed ? ' OBSTRUCTED' : ''}` +
+      `${camera.groundClamped ? ' CLAMPED' : ''}` +
+      `${camera.resetting ? ' ESCAPING' : ''}\n` +
+      `pos ${position.x.toFixed(2)} ${position.y.toFixed(2)} ${position.z.toFixed(2)}   ` +
+      `yaw ${degrees(camera.yaw)}deg  pitch ${degrees(camera.pitch)}deg\n` +
+      `idle ${camera.idleSeconds.toFixed(2)} s` +
+      `${camera.resetting ? '   <-- stuck detector fired; this should be rare' : ''}`;
   }
 
   /** Write the live-tunable block. */
