@@ -1,1 +1,132 @@
-# TombRunner
+# Jungle Relic
+
+A bright, PS1-styled 3D action-adventure that runs in the browser. You are an expedition
+archaeologist racing a cult to a jungle relic — through a lush canopy, warm stone temples
+and lantern-lit caverns.
+
+> **Status: Milestone 1.1 complete.** The rendering pipeline and the Zone 1 environment are
+> playable to look at. The character controller (1.2), camera (1.3) and input (1.4) are next.
+> See `docs/DEV_LOG.md` for a full, honest account of what exists and what does not.
+
+---
+
+## Running it
+
+**Requirements:** Node 20+ (developed on Node 22) and a browser with **WebGL 2**.
+
+```bash
+npm install     # install dependencies
+npm run dev     # start the dev server, then open http://localhost:5173
+```
+
+The dev server binds to `0.0.0.0` and accepts any host, so it also works behind a proxy
+or in a container.
+
+### All commands
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server with hot module replacement |
+| `npm run build` | Production build into `dist/` |
+| `npm run preview` | Serve the production build locally |
+| `npm test` | Run the full test suite (Vitest) |
+| `npm run typecheck` | Type-check without emitting (`tsc --noEmit`) |
+
+### Controls
+
+There is no player character yet. Milestone 1.1 renders the environment with a slowly
+orbiting preview camera so that the two most important visual effects — vertex wobble and
+affine texture warping — are visible in motion. A static camera would hide both.
+
+---
+
+## What is actually here
+
+### The look
+
+Every PS1 artefact is real, not a post-processing filter:
+
+- **480×270 internal render target**, upscaled with nearest-neighbour sampling at an
+  **integer** scale and letterboxed, so pixels stay crisp and uniform.
+- **Vertex snapping** in clip space to a virtual pixel grid, which produces the
+  characteristic wobble as the camera moves.
+- **Affine texture mapping** via the two-varying shader trick, with a `warpAmount` control
+  (default 0.65) because unrestricted affine warping makes large surfaces look broken
+  rather than retro.
+- **Palette quantisation with 4×4 ordered dithering** in a dedicated post pass.
+- **Flat vertex lighting** — direction sun + ambient + rim with a hard terminator. No PBR,
+  no shadows, no bloom, no SSAO, no motion blur, no depth of field, no chromatic
+  aberration. Those are excluded by design, not by omission.
+
+It is deliberately **bright**: saturated greens, warm ochre stone, a blue sky with clouds.
+This is an adventure, not a horror game.
+
+### The engineering
+
+- **No binary art assets.** Every texture is generated procedurally at start-up as a
+  `DataTexture` from a seeded PRNG. There is nothing to download, decode or 404, and the
+  world is byte-identical on every reload.
+- **Deterministic 60 Hz fixed-timestep simulation** with a clamped accumulator, so physics
+  behaves identically at 30, 60 and 144 Hz.
+- **Two-phase boot:** an animated loading screen with no dependencies, then Three.js and
+  Rapier (a ~1.7 MB gzipped WASM chunk) loaded lazily behind it.
+- **Per-cell instanced batching**, so frustum culling actually rejects geometry instead of
+  drawing every tree in the level the moment one is visible.
+
+---
+
+## Tests
+
+```bash
+npm test
+```
+
+Four suites, 80 tests, all running headlessly in Node:
+
+| Suite | Covers |
+|---|---|
+| `test/characterisation/` | Pins the observed behaviour of Rapier's character controller, including a permanent-corruption bug discovered in Phase 0 |
+| `test/unit/ps1-math.test.ts` | Vertex snapping, the affine-UV derivation, letterboxing, terminator clamping, palette quantisation |
+| `test/unit/shader-uniforms.test.ts` | Shader/JS uniform agreement, GLSL ES 1.00 compatibility lint, FOV conversion |
+| `test/integration/level-build.test.ts` | Builds the real level and lands a real character on the generated terrain |
+
+**Honest gap:** Vitest cannot compile GLSL or run WebGL, so "does it look right" is not
+covered by CI. The mitigation is that all shader *mathematics* lives in unit-tested
+TypeScript (`src/core/math/ps1.ts`), that every uniform is checked to exist in both
+languages, and that GLSL ES 1.00 compatibility is linted. Compilation and appearance are
+covered by manual checklists recorded in `docs/DEV_LOG.md`.
+
+---
+
+## Project layout
+
+```
+src/
+  app/        Boot sequence, frame loop, DOM wiring
+  core/       Constants, PS1 shader mathematics, seeded PRNG   <- no Three.js dependency
+  physics/    The only module that touches Rapier
+  render/     PS1 pipeline, material factory, GLSL sources
+  world/      Procedural textures, low-poly geometry, level builder
+test/
+  characterisation/   Engine behaviour pinned as regression tests
+  unit/               Pure logic
+  integration/        Systems together, with real physics
+docs/         Architecture, risk register, game design document, dev log
+```
+
+The dependency direction is one-way (`app → world → render → physics → core`) and is
+enforced by convention and review; `core/math/` imports nothing but itself, which is what
+lets the shader maths run in bare Node.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engine selection with 5 candidates scored, self-criticism of the choice, and 12 empirical experiments run against the real libraries |
+| [`docs/RISK_ANALYSIS.md`](docs/RISK_ANALYSIS.md) | 15 risks, scored and with a chosen mitigation each |
+| [`docs/GAME_DESIGN_DOC.md`](docs/GAME_DESIGN_DOC.md) | Full design: movement, camera, combat, puzzles, climbing, zones, visual style |
+| [`docs/DEV_LOG.md`](docs/DEV_LOG.md) | Build log, including a deep-debug session on a physics bug and a documented wrong turn |
+
+## Licence
+
+Not yet specified.

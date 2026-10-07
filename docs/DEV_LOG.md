@@ -6,6 +6,95 @@
 
 ---
 
+## 2026-10-07 (commit 2) — Milestone 1.1: Scene & Rendering Pipeline
+
+**Commit scope:** the PS1 rendering pipeline, procedural texturing, low-poly geometry, the Zone 1 jungle environment, the physics seam with its prime-step guard, project scaffolding (Vite/TypeScript config, `index.html`), 22 new tests (80 total), and three READMEs. No gameplay code — the character controller is Milestone 1.2.
+
+### What I Built
+
+- **`src/core/constants.ts`** — every GDD tunable in one place, with units encoded in the identifiers (`RUN_SPEED_MPS`, `COYOTE_TICKS`, `FIXED_DT`, `CONTROLLER_OFFSET_M`). The review protocol forbids magic numbers elsewhere, so this file is the single place a number may live.
+- **`src/core/math/ps1.ts`** — the PS1 shader mathematics as pure functions: clip-space vertex snapping, affine vs perspective UV interpolation, the shader-trick identity, warp blending, integer-scale letterboxing, hard terminator clamping, and palette quantisation with an ordered dither table. **This exists because Vitest cannot compile GLSL** (risk W4): proving the maths in TypeScript makes the GLSL a transliteration rather than an act of faith.
+- **`src/core/math/rng.ts`** — SplitMix32 seeded PRNG and a 2D value-noise / fBm sampler, so every generated artefact is byte-identical on every reload.
+- **`src/render/shaders/ps1World.ts`** — all GLSL. World shader (vertex snap, affine-UV pair, flat lighting with rim, fog), palette pass, blit pass, and the sky dome shader. Written in GLSL ES 1.00 deliberately: it is the lowest common denominator that WebGL2 contexts still accept.
+- **`src/render/PS1Material.ts`** — one material factory, plus **shared uniform objects** so retuning the sun updates every material in a single write rather than by walking the scene and inevitably missing one.
+- **`src/render/PS1Pipeline.ts`** — 480×270 scene target → palette-quantisation pass → integer-scaled, letterboxed, nearest-neighbour blit. Full disposal, cached canvas sizing, and frame statistics.
+- **`src/world/textures.ts`** — six procedural textures (grass, stone, bark, foliage with binary alpha, dirt, water) plus the Bayer dither table. **The game ships zero binary image assets.**
+- **`src/world/geometry.ts`** — palm, broadleaf, rock, pillar, broken statue, ruined wall, ground and sky-dome builders, all with baked vertex colours; plus a merging utility that validates its inputs rather than silently producing an empty mesh.
+- **`src/world/InstanceBatcher.ts`** — per-cell instanced batching. A single `InstancedMesh` is one draw call but is culled as one object, so all-two-hundred-trees are drawn the moment one is visible. Batching per 32 m cell makes three.js' ordinary frustum culling do real work.
+- **`src/world/LevelBuilder.ts`** — the Zone 1 environment: sky dome, undulating ground, 34 trees across two species, 22 rocks, a stepped temple platform with six uneven pillars, five crumbling walls, four headless guardian statues, and a water pool. Decomposed into one function per feature, each under the 50-line review limit.
+- **`src/physics/Layers.ts` + `src/physics/PhysicsWorld.ts`** — the Rapier seam, including `KinematicCharacter`, the mandatory prime step, and the boot assertion.
+- **`src/app/Game.ts` + `src/app/main.ts`** — the clamped fixed-timestep loop, resize handling, teardown, and a two-phase boot with an animated no-dependency loading screen.
+- **Tests: 80 passing** across four suites (characterisation, PS1 maths, shader lint, level integration).
+
+### Problems Encountered
+
+**P1 — My own integration test caught a real bug that would have looked like "there is no ground here".**
+The boot assertion in `PhysicsWorld.primeAndVerify` failed with *"no ground beneath the spawn point"* — against a level whose ground collider provably existed (the collider count was right, the trimesh extraction was right, the ray direction was right). The cause was a Rapier interaction-group trap I did not know about:
+
+Rapier accepts an interaction only if **both** halves pass: `(query.membership & collider.filter) !== 0` **and** `(collider.membership & query.filter) !== 0`. A collider's filter lists the layers it collides with — and for the static world that list notably does **not** include `StaticWorld` itself. So passing `collisionGroupsFor([StaticWorld])` for the raycast produced membership `{StaticWorld}` against a collider filter of `{Player, Enemy, PropDynamic, PuzzleBlock, Projectile}`, the first half evaluated to zero, and the ray hit nothing — with no error, no warning, and a result indistinguishable from an empty level.
+
+**Fix:** a separate `queryGroupsFor()` that claims membership in *every* layer and expresses intent through the filter mask alone. Worth noting how this was caught: not by reasoning, but by an assertion that *had* to hold if my understanding were correct. That is the second time in two milestones that a test has caught an error in my own head, and it is becoming the clearest argument for this project's testing discipline.
+
+**P2 — GLSL ES 1.00 has no `round()`, and CI would never have told me.**
+The vertex-snap shader used `round(ndc / gridStep)`, which is GLSL ES 3.00 syntax. In an ES 1.00 shader it is a hard compile error — presenting to a player as a black screen, with the only diagnostic in a browser console I cannot open from this environment. `floor(x + 0.5)` is exactly equivalent to JavaScript's `Math.round` for every input (both round a `.5` toward +Infinity), so the GLSL and the tested TypeScript stay in perfect agreement.
+**Fix:** replaced the call, added a comment explaining why, and wrote a **GLSL ES 1.00 compatibility lint** that now statically forbids `round()`, `texture()`, ES 3.00 `in`/`out` declarations, missing precision qualifiers, `#version` directives, and array constructors. I also replaced `mat3(instanceMatrix)` with three explicit column vectors, because matrix-from-matrix construction has patchy ES 1.00 driver support — and instancing is precisely where a driver-dependent failure would be hardest to diagnose.
+**Amusing sub-bug:** the new lint immediately failed on *my own explanatory comment*, which contained the forbidden word. Fixed by stripping comments before linting; a rule that forbids a construct should not also forbid explaining why it is forbidden.
+
+**P3 — `intersectionWithShape`'s `filterGroups` is the fifth argument, not the seventh.**
+TypeScript caught this one, which is exactly why `strict` plus `noUnusedLocals` are on. Passing the groups positionally into the `filterExcludeRigidBody` slot is a type error under strict mode but would be a silent, confusing no-op in looser code. The correct signature is now recorded in a comment at the call site and in `src/physics/README.md`.
+
+**P4 — Two of my own code-quality rules were broken by my first draft of `LevelBuilder.ts`.**
+The initial version had a 300-line `buildJungleLevel`, a `require()` call inside an ESM module (which would have failed under Vite), statements after a `return`, and a duplicated trimesh-extraction routine copied from `geometry.ts` instead of reused. I rewrote it as a `BuildContext` threaded through seven small per-feature functions. **I am recording this because the review protocol exists precisely to catch it, and it caught it: the rule "no function over 50 lines" is the reason the rewrite happened before the commit rather than during Milestone 3.**
+
+**P5 — Unused-import and dead-code errors, twelve of them.** `noUnusedLocals` and `noUnusedParameters` turned these into build failures rather than lint warnings that accumulate. One was a genuine unused constructor parameter (`KinematicCharacter` took a Rapier `World` it never read), which I removed rather than silenced.
+
+### Alternatives Considered
+
+**Palette quantisation in the world shader vs. as a separate post pass.**
+*World shader:* one fewer pass and no second render target. *Post pass:* runs once over 129,600 fragments instead of once per object with overdraw, quantises the composited frame (which is what period hardware actually did), and keeps the world shader narrow enough to audit against the tested TypeScript. **Chose the post pass**, and it also made the dither table straightforward — the palette pass samples the Bayer matrix by `gl_FragCoord`, which sidesteps GLSL ES 1.00's lack of array constructors entirely.
+
+**Dither matrix as a GLSL const array vs. a 4×4 texture.**
+*Const array:* no texture bind. *Texture:* GLSL ES 1.00 does not support array constructors, and a texture guarantees the values are bit-identical to the unit-tested TypeScript table. **Chose the texture**, which was also the era-appropriate technique — period hardware used lookup tables for exactly this.
+
+**One `InstancedMesh` per prop type vs. per spatial cell.**
+*Per type:* fewest draw calls. *Per cell:* three.js culls an `InstancedMesh` as a **single object** against its whole bounding sphere, so one visible tree means every tree in the level is drawn — the classic "instancing made my frame rate worse" trap. **Chose per cell** (32 m), which gives 1–4 visible batches for a 60° camera in a 240 m level. Draw calls rise slightly; submitted vertex work falls by an order of magnitude.
+
+**Vertex snap via `round()` vs. `floor(x + 0.5)`.** Forced by the ES 1.00 constraint (P2), and the equivalence is exact, so there was no real trade — but it is worth recording that the *tested* TypeScript uses `Math.round` and the GLSL uses `floor(x + 0.5)`, and they agree for all inputs including negatives. A test asserts the error bound and idempotence, so a future divergence fails CI.
+
+**Ground as a heightfield collider vs. a trimesh extracted from the rendered geometry.**
+*Heightfield:* cheaper to collide. *Trimesh:* the collision surface is *literally the same buffer* as the visual surface, so the player can never float above or sink into terrain. **Chose the trimesh.** The cost is a few thousand triangles in the collision mesh, which E10's 10.6× headroom comfortably absorbs.
+
+**Authoring the level as a data file vs. code.**
+Punted, deliberately: the level is currently code, and Phase 3 will introduce a declarative DSL when there is enough content to justify the abstraction. Inventing a format for one zone would be speculative generality.
+
+### Doubts & Uncertainties
+
+1. **I still cannot see the game.** There is no browser in this environment, so Milestone 1.1's actual deliverable — *"working jungle scene with PS1 shaders"* — is verified only by construction and by headless tests, not by looking at it. Everything that *can* be checked without a GPU has been: the maths is tested, uniforms are cross-checked in both directions, GLSL ES 1.00 compatibility is linted, and a real character lands on the real generated terrain. **What remains unverified is genuinely unverifiable here:** whether the shaders compile on a real driver, whether the scene composes attractively, and whether `warpAmount = 0.65` is the right default. These are recorded as open questions rather than quietly assumed to be fine, and the first task of the next milestone is a manual visual checklist.
+2. **`warpAmount` and the snap grid are still reasoned guesses.** The thinking is sound — bright scenes expose artefacts maximally, so default below maximum — but "is it charming?" is a human judgement that no test in this suite can make. The dev overlay for live tuning is not built yet, and it is the first thing I want once there is a browser to tune against.
+3. **The scene draws ~40–120 draw calls, not the 6 I originally estimated.** Per-cell batching plus one batcher per species per variant means more batches than I assumed. It is comfortably within budget, but it is a real number rather than the optimistic one I had in my head, and I would rather record that than pretend the estimate held.
+4. **`polygonOffset` is a hypothesis, not a measurement.** Vertex snapping *can* cause z-fighting between coplanar polygons, and a negative polygon offset is the standard remedy — but I have not been able to observe the z-fighting it prevents, or confirm it does not over-bias distant geometry. Flagged for the visual checklist.
+5. **The Rapier chunk is 1.67 MB gzipped** — larger than hoped, though it is correctly lazy-loaded behind the loading screen so it does not block the first paint. If mobile ever becomes a target (it is explicitly scoped out, R12), this is the single largest obstacle.
+6. **Two milestones, two bugs found by tests rather than by reasoning.** Phase 0's E1 corruption, and now the query-groups trap. Both were invisible to careful reading and obvious to an assertion. I am treating this as a signal about which activities actually de-risk this project.
+
+### Next Steps
+
+**Milestone 1.2 — the character controller (critical path).** This is the heart of the game and everything else depends on it.
+1. **A manual visual checklist first**, on a machine with a browser, before building more systems on top of an unverified renderer.
+2. `src/core/math/locomotion.ts` — coyote time, jump buffering, slope-band classification, and the jump-arc solver, as pure tested functions *before* they touch Rapier.
+3. `src/gameplay/CharacterController.ts` — the hierarchical, discarding locomotion state machine (grounded / mantle / hang / climb / water / zip line) so mutually exclusive states are structurally impossible (risk R15), driven by the 5-ray ground cone probe.
+4. The ten mandated movement edge cases, each with a test.
+5. A dev overlay for live shader and tuning values, since Doubt #2 needs one.
+
+**Then** Milestone 1.3 (camera) and 1.4 (input), after which the game is genuinely controllable and the feel can be assessed properly.
+
+### Deep Debug Sessions
+
+Two entries now. The second — *"Raycasts silently match nothing when handed collider-style interaction groups"* — qualified under the rule on attempt count once the boot assertion had failed and two incorrect hypotheses (a missing collider, then a wrong ray direction) had been eliminated by inspecting the world. The full analysis is in P1 above.
+
+The earlier entry stands: *"Rapier character controller permanently ignores geometry when queried before the first world step"*.
+
+---
+
 ## 2026-10-07 (commit 1) — Phase 0: Documentation, Doubt & One Important Mistake
 
 **Commit scope:** the four Phase 0 documents, project scaffolding (`.gitignore`, `package.json`, pinned dependencies), and the first real test suite. No game logic. Rule #1 satisfied: `docs/` contains all four required documents before any game code exists.

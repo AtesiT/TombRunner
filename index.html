@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Jungle Relic — a bright, PS1-styled 3D action-adventure in the browser." />
+    <title>Jungle Relic</title>
+    <style>
+      /*
+        Styles are inline rather than in a separate sheet on purpose: this is everything
+        the player sees during Phase A of the boot, and an extra round trip for a
+        stylesheet would delay the only thing standing between them and a black screen.
+      */
+      :root {
+        --jungle-deep: #10261c;
+        --jungle-mid: #1d4433;
+        --sun: #ffd97a;
+        --sand: #d8bd90;
+        --ink: #0a1512;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #050a08;
+        color: var(--sand);
+        font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+      }
+
+      #game-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        /* Cursor is hidden during play; pointer lock arrives with the camera in M1.3. */
+        cursor: none;
+        /* Prevent the browser from intercepting touch gestures as scroll/zoom. */
+        touch-action: none;
+      }
+
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.75rem;
+        background:
+          radial-gradient(circle at 50% 120%, var(--jungle-mid) 0%, transparent 60%),
+          linear-gradient(180deg, #0d1f18 0%, #050a08 100%);
+        z-index: 10;
+        opacity: 1;
+        transition: opacity 400ms ease-out;
+      }
+
+      #loading.loading--hidden { opacity: 0; pointer-events: none; }
+
+      .title {
+        margin: 0;
+        font-size: clamp(1.75rem, 6vw, 3rem);
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: var(--sun);
+        text-shadow: 0 0 18px rgba(255, 217, 122, 0.3), 2px 2px 0 var(--ink);
+      }
+
+      .subtitle {
+        margin: 0;
+        font-size: 0.8rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        opacity: 0.65;
+      }
+
+      .loading__bar {
+        width: min(340px, 70vw);
+        height: 8px;
+        border: 1px solid rgba(216, 189, 144, 0.35);
+        background: rgba(0, 0, 0, 0.45);
+      }
+
+      #loading-progress {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, #6aa84f, var(--sun));
+        transition: width 220ms ease-out;
+      }
+
+      #loading-status {
+        font-size: 0.78rem;
+        letter-spacing: 0.12em;
+        opacity: 0.8;
+        min-height: 1.2em;
+      }
+
+      /* A gently bobbing relic glyph keeps the screen alive during Phase A. */
+      .relic {
+        font-size: 2.4rem;
+        line-height: 1;
+        animation: bob 2.4s ease-in-out infinite;
+      }
+
+      @keyframes bob {
+        0%, 100% { transform: translateY(0) rotate(-3deg); opacity: 0.85; }
+        50% { transform: translateY(-10px) rotate(3deg); opacity: 1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .relic { animation: none; }
+        #loading { transition: none; }
+      }
+
+      .boot-failure {
+        max-width: 34rem;
+        padding: 2rem;
+        text-align: center;
+      }
+
+      .boot-failure h1 {
+        font-size: 1.1rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--sun);
+      }
+
+      .boot-failure__detail {
+        color: #ffb4a2;
+        font-size: 0.85rem;
+        word-break: break-word;
+      }
+
+      .boot-failure__hint {
+        opacity: 0.7;
+        font-size: 0.78rem;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game-canvas"></canvas>
+
+    <div id="loading">
+      <div class="relic" aria-hidden="true">🏺</div>
+      <h1 class="title">Jungle Relic</h1>
+      <p class="subtitle">An expedition in five zones</p>
+      <div class="loading__bar">
+        <div id="loading-progress"></div>
+      </div>
+      <p id="loading-status" role="status" aria-live="polite">Preparing…</p>
+    </div>
+
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>
