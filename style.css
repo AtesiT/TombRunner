@@ -161,37 +161,36 @@ body.has-pointer-lock #canvas {
   border-radius: 6px;
 }
 
-/* ---------- Мобил-сенсорное управление ---------- */
+/* ---------- Mobile touch controls ---------- */
 #touchZones {
   position: absolute;
   inset: 0;
-  display: none;
   z-index: 5;
   touch-action: none;
+  pointer-events: none;
 }
-#leftZone {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 50%;
-  height: 100%;
-}
+#leftZone,
 #rightZone {
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: 50%;
-  height: 100%;
+  pointer-events: auto;
 }
 
 #mobileControls {
   position: absolute;
   bottom: 20px;
   left: 20px;
-  display: none;
   z-index: 10;
   pointer-events: auto;
   touch-action: none;
+}
+
+/* Touch zones and mobile buttons only on touch devices without pointer lock */
+body:not(.has-touch) #touchZones,
+body:not(.has-touch) #mobileControls {
+  display: none !important;
+}
+body.has-touch:not(.has-pointer-lock) #touchZones,
+body.has-touch:not(.has-pointer-lock) #mobileControls {
+  display: block !important;
 }
 
 .joystick {
@@ -245,12 +244,4 @@ body.has-pointer-lock #canvas {
 .act-btn:active {
   background: rgba(255, 255, 255, 0.38);
   border-color: rgba(255, 255, 255, 0.9);
-}
-
-/* Когда нет pointer lock (например, на мобайле) — показываем тач-зоны и кнопки */
-body:not(.has-pointer-lock) #touchZones {
-  display: block;
-}
-body:not(.has-pointer-lock) #mobileControls {
-  display: block;
 }

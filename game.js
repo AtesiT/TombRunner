@@ -38,6 +38,7 @@ window.addEventListener('blur', () => {
 
 const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 const bodyEl = document.body;
+if (isTouch) bodyEl.classList.add('has-touch');
 
 function updatePointerLockUI() {
   if (pointerLocked.value) {
