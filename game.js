@@ -35,6 +35,17 @@ window.addEventListener('blur', () => {
   for (const k in keys) keys[k] = false;
 });
 
+const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+const bodyEl = document.body;
+
+function updatePointerLockUI() {
+  if (pointerLocked.value) {
+    bodyEl.classList.add('has-pointer-lock');
+  } else {
+    bodyEl.classList.remove('has-pointer-lock');
+  }
+}
+
 const canvas = document.getElementById('canvas');
 const startBtn = document.getElementById('startBtn');
 const menuEl = document.getElementById('menu');
@@ -54,6 +65,7 @@ document.addEventListener('pointerlockchange', () => {
   pointerLocked.value = document.pointerLockElement === canvas;
   menuEl.classList.toggle('hidden', pointerLocked.value);
   hudEl.classList.toggle('hidden', !pointerLocked.value);
+  updatePointerLockUI();
   if (!pointerLocked.value) {
     for (const k in keys) keys[k] = false;
   }
@@ -69,6 +81,90 @@ window.addEventListener('mousemove', (e) => {
   pitch -= e.movementY * sens;
   pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
 });
+
+// -------------------- СЕНСОРНОЕ УПРАВЛЕНИЕ (мобайл) --------------------
+const joyDir = new THREE.Vector2();
+let joyActive = false;
+let touchJoyStart = null;
+let touchLookLast = null;
+
+const leftZone = document.getElementById('leftZone');
+const rightZone = document.getElementById('rightZone');
+const joyStick = document.getElementById('joyStick');
+
+leftZone.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  joyActive = true;
+  const t = e.changedTouches[0];
+  touchJoyStart = { x: t.clientX, y: t.clientY };
+  joyDir.set(0, 0);
+  joyStick.style.transform = 'translate(0,0)';
+}, { passive: false });
+
+leftZone.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!joyActive || !touchJoyStart) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchJoyStart.x;
+  const dy = t.clientY - touchJoyStart.y;
+  const dist = Math.hypot(dx, dy);
+  const max = 44;
+  let nx = dx, ny = dy;
+  if (dist > max) {
+    nx = (dx / dist) * max;
+    ny = (dy / dist) * max;
+  }
+  joyStick.style.transform = `translate(${nx}px, ${ny}px)`;
+  joyDir.set(nx / max, ny / max);
+}, { passive: false });
+
+leftZone.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  joyActive = false;
+  touchJoyStart = null;
+  joyDir.set(0, 0);
+  joyStick.style.transform = 'translate(0,0)';
+});
+
+rightZone.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  touchLookLast = { x: t.clientX, y: t.clientY };
+}, { passive: false });
+
+rightZone.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!touchLookLast) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchLookLast.x;
+  const dy = t.clientY - touchLookLast.y;
+  const sens = 0.0015;
+  yaw -= dx * sens;
+  pitch -= dy * sens;
+  pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
+  touchLookLast = { x: t.clientX, y: t.clientY };
+}, { passive: false });
+
+rightZone.addEventListener('touchend', () => {
+  touchLookLast = null;
+});
+
+function bindTouchBtn(id, code) {
+  const btn = document.getElementById(id);
+  const press = () => { keys[code] = true; };
+  const release = () => { keys[code] = false; };
+  btn.addEventListener('touchstart', (e) => { e.preventDefault(); press(); }, { passive: false });
+  btn.addEventListener('touchend', (e) => { e.preventDefault(); release(); }, { passive: false });
+  btn.addEventListener('mousedown', press);
+  btn.addEventListener('mouseup', release);
+  btn.addEventListener('mouseleave', release);
+}
+
+if (isTouch) {
+  bindTouchBtn('btnJump', 'Space');
+  bindTouchBtn('btnRun', 'ShiftLeft');
+  bindTouchBtn('btnAction', 'KeyE');
+}
 
 // целевая скорость перемещения в мировом пространстве (относительно угла взгляда камеры)
 function getTargetVelocity() {
@@ -398,7 +494,16 @@ function updateCamera() {
 function updateGame(dt) {
   if (!pointerLocked.value) return;
 
-  const targetVel = getTargetVelocity();
+  let targetVel = getTargetVelocity();
+  if (joyDir.lengthSq() > 0.01) {
+    const s = (keys['ShiftLeft'] || keys['ShiftRight']) ? CFG.runSpeed : CFG.walkSpeed;
+    const jv = new THREE.Vector3(joyDir.x, 0, -joyDir.y);
+    if (targetVel.lengthSq() > 0) {
+      targetVel.add(jv).normalize().multiplyScalar(s);
+    } else {
+      targetVel = jv.normalize().multiplyScalar(s);
+    }
+  }
   const acc = grounded ? CFG.accel : CFG.airAccel;
   vel.x += (targetVel.x - vel.x) * Math.min(1, acc * dt);
   vel.z += (targetVel.z - vel.z) * Math.min(1, acc * dt);

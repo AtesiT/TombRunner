@@ -157,3 +157,97 @@ html, body {
   padding: 0.4rem 0.9rem;
   border-radius: 6px;
 }
+
+/* ---------- Мобил-сенсорное управление ---------- */
+#touchZones {
+  position: absolute;
+  inset: 0;
+  display: none;
+  z-index: 5;
+  touch-action: none;
+}
+#leftZone {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 50%;
+  height: 100%;
+}
+#rightZone {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 50%;
+  height: 100%;
+}
+
+#mobileControls {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  display: none;
+  z-index: 10;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.joystick {
+  position: relative;
+  width: 120px;
+  height: 120px;
+}
+.joy-base {
+  position: absolute;
+  inset: 0;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+}
+.joy-stick {
+  position: absolute;
+  width: 52px;
+  height: 52px;
+  left: 34px;
+  top: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 14px rgba(0, 0, 0, 0.5);
+  transform: translate(0, 0);
+}
+
+.act-buttons {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.act-btn {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  line-height: 1.15;
+  text-align: center;
+}
+.act-btn:active {
+  background: rgba(255, 255, 255, 0.38);
+  border-color: rgba(255, 255, 255, 0.9);
+}
+
+/* Когда нет pointer lock (например, на мобайле) — показываем тач-зоны и кнопки */
+body:not(.has-pointer-lock) #touchZones {
+  display: block;
+}
+body:not(.has-pointer-lock) #mobileControls {
+  display: block;
+}
