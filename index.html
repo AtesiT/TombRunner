@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TombRunner — прототип окружения и физики</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="canvas" tabindex="0"></canvas>
+
+  <div id="ui">
+    <div id="menu">
+      <h1>TombRunner</h1>
+      <p>Прототип окружения и физики (в стиле Tomb Raider)</p>
+      <p>Истории пока нет — есть уровень, персонаж, гравитация, прыжки, стены и лестницы.</p>
+      <button id="startBtn">Начать игру</button>
+      <div class="controls">
+        <span>WASD — движение &nbsp;•&nbsp; Shift — бег &nbsp;•&nbsp; Пробел — прыжок</span>
+        <span>Мышь — оглядка &nbsp;•&nbsp; ESC — выйти из режима оглядки</span>
+      </div>
+    </div>
+
+    <div id="hud" class="hidden">
+      <div id="crosshair"></div>
+      <div id="artifacts">Артефактов: <span id="artCount">0</span> / 3</div>
+      <div id="msg"></div>
+      <div id="instr">Соберите все три золотых артефакта на уровне</div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/node_modules/three/build/three.module.js"
+      }
+    }
+  </script>
+  <script type="module" src="game.js"></script>
+</body>
+</html>

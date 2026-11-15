@@ -1,0 +1,159 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #fff;
+}
+
+#canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  cursor: none;
+  outline: none;
+}
+
+#ui {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 10;
+  text-align: center;
+}
+
+#ui * {
+  pointer-events: auto;
+}
+
+#menu {
+  padding: 2.5rem 2rem;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid #8a6d3b;
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+  max-width: 460px;
+}
+
+#menu h1 {
+  font-size: 2.2rem;
+  letter-spacing: 6px;
+  color: #d4a03a;
+  margin-bottom: 0.6rem;
+  text-transform: uppercase;
+  text-shadow: 0 0 14px rgba(212, 160, 58, 0.35);
+}
+
+#menu p {
+  margin-bottom: 0.6rem;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: #e8e8e8;
+}
+
+#menu button {
+  margin-top: 1.1rem;
+  padding: 0.85rem 1.7rem;
+  font-size: 1rem;
+  background: #8a6d3b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+#menu button:hover {
+  background: #a9834e;
+}
+
+.controls {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: #b9b9b9;
+  line-height: 1.7;
+}
+
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#hud.hidden, #menu.hidden {
+  display: none !important;
+}
+
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.75);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+#crosshair::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
+
+#artifacts {
+  position: absolute;
+  top: 1.2rem;
+  left: 1.2rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  border-left: 3px solid #d4a03a;
+  letter-spacing: 1px;
+}
+
+#msg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #d4a03a;
+  text-shadow: 0 0 16px rgba(0, 0, 0, 0.9);
+  letter-spacing: 2px;
+}
+
+#instr {
+  position: absolute;
+  bottom: 1.2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.9rem;
+  color: #c8c8c8;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+}
