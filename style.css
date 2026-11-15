@@ -17,8 +17,11 @@ html, body {
   display: block;
   width: 100vw;
   height: 100vh;
-  cursor: none;
   outline: none;
+}
+body:has(#canvas:pointer-lock) #canvas,
+body.has-pointer-lock #canvas {
+  cursor: none;
 }
 
 #ui {

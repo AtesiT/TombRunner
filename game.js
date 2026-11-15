@@ -54,37 +54,75 @@ const hudEl = document.getElementById('hud');
 const artCountEl = document.getElementById('artCount');
 const msgEl = document.getElementById('msg');
 
+function startGame() {
+  menuEl.classList.add('hidden');
+  hudEl.classList.remove('hidden');
+  updatePointerLockUI();
+  audio.resume();
+  audio.startMusic();
+}
+
 startBtn.addEventListener('click', () => {
   canvas.focus();
   canvas.requestPointerLock();
+  // начинаем игру в любом случае — fallback, если pointer lock заблокирован (iframe и т.п.)
+  startGame();
 });
 canvas.addEventListener('click', () => {
   if (!pointerLocked.value) canvas.requestPointerLock();
 });
 
 document.addEventListener('pointerlockchange', () => {
+  const wasLocked = pointerLocked.value;
   pointerLocked.value = document.pointerLockElement === canvas;
   menuEl.classList.toggle('hidden', pointerLocked.value);
   hudEl.classList.toggle('hidden', !pointerLocked.value);
   updatePointerLockUI();
-  if (pointerLocked.value) {
+  if (pointerLocked.value && !wasLocked) {
     audio.resume();
     audio.startMusic();
-  } else {
+  }
+  if (!pointerLocked.value) {
     for (const k in keys) keys[k] = false;
-    // музыка продолжает играть в меню; если хотите остановить — раскомментируйте:
-    // audio.stopMusic();
   }
 });
 document.addEventListener('pointerlockerror', () => {
-  console.warn('Pointer lock не доступен');
+  console.warn('Pointer lock не доступен — игра без блокировки курсора');
 });
 
+// ---------- Управление камерой мышью без pointer lock (зажатая левая кнопка) ----------
+let mouseLookActive = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 0) {
+    mouseLookActive = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    canvas.focus();
+    if (!pointerLocked.value) canvas.requestPointerLock();
+  }
+});
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 0) mouseLookActive = false;
+});
 window.addEventListener('mousemove', (e) => {
-  if (!pointerLocked.value) return;
   const sens = 0.0022;
-  yaw -= e.movementX * sens;
-  pitch -= e.movementY * sens;
+  let dx = 0,
+    dy = 0;
+  if (pointerLocked.value) {
+    dx = e.movementX;
+    dy = e.movementY;
+  } else if (mouseLookActive) {
+    dx = e.clientX - lastMouseX;
+    dy = e.clientY - lastMouseY;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  }
+  if (dx === 0 && dy === 0) return;
+  yaw -= dx * sens;
+  pitch -= dy * sens;
   pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
 });
 
