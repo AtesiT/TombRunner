@@ -18,13 +18,17 @@ const CFG = {
   fallKillY: -20,
 };
 
-// ============================== INPUT ==============================
-const keys = {};
+// ============================== STATE ==============================
+let gameStarted = false;        // игра началась (меню скрыто)
 const pointerLocked = { value: false };
-let yaw = 0;   // характер / камера смотреть вдоль этого угла (вокруг Y)
-let pitch = 0; // наклон камеры вверх-вниз
+let yaw = 0;
+let pitch = 0;
+
+// ============================== INPUT: KEYBOARD ==============================
+const keys = {};
 
 function onKeyDown(e) {
+  if (!gameStarted) return;
   keys[e.code] = true;
 }
 function onKeyUp(e) {
@@ -36,79 +40,33 @@ window.addEventListener('blur', () => {
   for (const k in keys) keys[k] = false;
 });
 
-const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-const bodyEl = document.body;
-if (isTouch) bodyEl.classList.add('has-touch');
-
-function updatePointerLockUI() {
-  if (pointerLocked.value) {
-    bodyEl.classList.add('has-pointer-lock');
-  } else {
-    bodyEl.classList.remove('has-pointer-lock');
-  }
-}
-
-const canvas = document.getElementById('canvas');
-const startBtn = document.getElementById('startBtn');
-const menuEl = document.getElementById('menu');
-const hudEl = document.getElementById('hud');
-const artCountEl = document.getElementById('artCount');
-const msgEl = document.getElementById('msg');
-
-function startGame() {
-  menuEl.classList.add('hidden');
-  hudEl.classList.remove('hidden');
-  updatePointerLockUI();
-  audio.resume();
-  audio.startMusic();
-}
-
-startBtn.addEventListener('click', () => {
-  canvas.focus();
-  canvas.requestPointerLock();
-  // начинаем игру в любом случае — fallback, если pointer lock заблокирован (iframe и т.п.)
-  startGame();
-});
-canvas.addEventListener('click', () => {
-  if (!pointerLocked.value) canvas.requestPointerLock();
-});
-
-document.addEventListener('pointerlockchange', () => {
-  const wasLocked = pointerLocked.value;
-  pointerLocked.value = document.pointerLockElement === canvas;
-  menuEl.classList.toggle('hidden', pointerLocked.value);
-  hudEl.classList.toggle('hidden', !pointerLocked.value);
-  updatePointerLockUI();
-  if (pointerLocked.value && !wasLocked) {
-    audio.resume();
-    audio.startMusic();
-  }
-  if (!pointerLocked.value) {
-    for (const k in keys) keys[k] = false;
-  }
-});
-document.addEventListener('pointerlockerror', () => {
-  console.warn('Pointer lock не доступен — игра без блокировки курсора');
-});
-
-// ---------- Управление камерой мышью без pointer lock (зажатая левая кнопка) ----------
+// ============================== INPUT: MOUSE / TOUCH CAMERA ==============================
+// Мышь: зажатая левая кнопка на canvas = оглядка (без pointer lock).
+// Pointer lock: если браузер даст — курсор скрывается, движение мыши = оглядка.
 let mouseLookActive = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 
+const canvas = document.getElementById('canvas');
+
 canvas.addEventListener('mousedown', (e) => {
-  if (e.button === 0) {
+  if (e.button === 0 && gameStarted) {
     mouseLookActive = true;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
     canvas.focus();
-    if (!pointerLocked.value) canvas.requestPointerLock();
+    if (!pointerLocked.value) {
+      canvas.requestPointerLock().catch(() => {
+        // pointer lock заблокирован (iframe) — останемся на режиме зажатой кнопки
+      });
+    }
   }
 });
 window.addEventListener('mouseup', (e) => {
   if (e.button === 0) mouseLookActive = false;
 });
 window.addEventListener('mousemove', (e) => {
+  if (!gameStarted) return;
   const sens = 0.0022;
   let dx = 0,
     dy = 0;
@@ -127,7 +85,62 @@ window.addEventListener('mousemove', (e) => {
   pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
 });
 
-// -------------------- СЕНСОРНОЕ УПРАВЛЕНИЕ (мобайл) --------------------
+// ============================== POINTER LOCK LIFECYCLE ==============================
+document.addEventListener('pointerlockchange', () => {
+  const wasLocked = pointerLocked.value;
+  pointerLocked.value = document.pointerLockElement === canvas;
+  updatePointerLockUI();
+  if (pointerLocked.value && !wasLocked) {
+    audio.resume();
+    audio.startMusic();
+  }
+});
+document.addEventListener('pointerlockerror', () => {
+  console.log('Pointer lock недоступен — играем без блокировки курсора');
+});
+
+function updatePointerLockUI() {
+  const body = document.body;
+  if (pointerLocked.value) {
+    body.classList.add('has-pointer-lock');
+  } else {
+    body.classList.remove('has-pointer-lock');
+  }
+}
+
+// ============================== UI: MENU / HUD ==============================
+const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+const bodyEl = document.body;
+if (isTouch) bodyEl.classList.add('has-touch');
+
+const startBtn = document.getElementById('startBtn');
+const menuEl = document.getElementById('menu');
+const hudEl = document.getElementById('hud');
+const artCountEl = document.getElementById('artCount');
+const msgEl = document.getElementById('msg');
+
+function startGame() {
+  if (gameStarted) return;
+  gameStarted = true;
+  menuEl.classList.add('hidden');
+  hudEl.classList.remove('hidden');
+  updatePointerLockUI();
+  audio.resume();
+  audio.startMusic();
+  canvas.focus();
+  canvas.requestPointerLock().catch(() => {});
+}
+
+startBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  startGame();
+});
+canvas.addEventListener('click', () => {
+  if (!gameStarted) startGame();
+  else if (!pointerLocked.value) canvas.requestPointerLock().catch(() => {});
+});
+
+// ============================== INPUT: MOBILE TOUCH ==============================
 const joyDir = new THREE.Vector2();
 let joyActive = false;
 let touchJoyStart = null;
@@ -138,6 +151,7 @@ const rightZone = document.getElementById('rightZone');
 const joyStick = document.getElementById('joyStick');
 
 leftZone.addEventListener('touchstart', (e) => {
+  if (!gameStarted) return;
   e.preventDefault();
   joyActive = true;
   const t = e.changedTouches[0];
@@ -147,6 +161,7 @@ leftZone.addEventListener('touchstart', (e) => {
 }, { passive: false });
 
 leftZone.addEventListener('touchmove', (e) => {
+  if (!gameStarted) return;
   e.preventDefault();
   if (!joyActive || !touchJoyStart) return;
   const t = e.changedTouches[0];
@@ -154,7 +169,8 @@ leftZone.addEventListener('touchmove', (e) => {
   const dy = t.clientY - touchJoyStart.y;
   const dist = Math.hypot(dx, dy);
   const max = 44;
-  let nx = dx, ny = dy;
+  let nx = dx,
+    ny = dy;
   if (dist > max) {
     nx = (dx / dist) * max;
     ny = (dy / dist) * max;
@@ -172,12 +188,14 @@ leftZone.addEventListener('touchend', (e) => {
 });
 
 rightZone.addEventListener('touchstart', (e) => {
+  if (!gameStarted) return;
   e.preventDefault();
   const t = e.changedTouches[0];
   touchLookLast = { x: t.clientX, y: t.clientY };
 }, { passive: false });
 
 rightZone.addEventListener('touchmove', (e) => {
+  if (!gameStarted) return;
   e.preventDefault();
   if (!touchLookLast) return;
   const t = e.changedTouches[0];
@@ -196,10 +214,20 @@ rightZone.addEventListener('touchend', () => {
 
 function bindTouchBtn(id, code) {
   const btn = document.getElementById(id);
-  const press = () => { keys[code] = true; };
-  const release = () => { keys[code] = false; };
-  btn.addEventListener('touchstart', (e) => { e.preventDefault(); press(); }, { passive: false });
-  btn.addEventListener('touchend', (e) => { e.preventDefault(); release(); }, { passive: false });
+  const press = () => {
+    if (gameStarted) keys[code] = true;
+  };
+  const release = () => {
+    keys[code] = false;
+  };
+  btn.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    press();
+  }, { passive: false });
+  btn.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    release();
+  }, { passive: false });
   btn.addEventListener('mousedown', press);
   btn.addEventListener('mouseup', release);
   btn.addEventListener('mouseleave', release);
@@ -211,7 +239,7 @@ if (isTouch) {
   bindTouchBtn('btnAction', 'KeyE');
 }
 
-// целевая скорость перемещения в мировом пространстве (относительно угла взгляда камеры)
+// ============================== CAMERA TARGET (relative to yaw) ==============================
 function getTargetVelocity() {
   const v = new THREE.Vector3();
   if (keys['KeyW']) v.z -= 1;
@@ -226,9 +254,31 @@ function getTargetVelocity() {
   return new THREE.Vector3(v.x * c - v.z * si, 0, v.x * si + v.z * c);
 }
 
+// ============================== THREE SETUP ==============================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d14);
+scene.fog = new THREE.FogExp2(0x0b0d14, 0.045);
+
+const camera = new THREE.PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  200
+);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const hemi = new THREE.HemisphereLight(0xaaaaaa, 0x222222, 0.7);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(12, 20, 8);
+sun.castShadow = true;
+scene.add(sun);
+
 // ============================== LEVEL / BOXES ==============================
-// Боксы уровня: {min, max, type, mesh}
-// type: 'floor' | 'pit' (смвкерать смсмерть при падении) | 'wall' | 'platform' | 'stairs'
 const boxes = [];
 
 function addBox(minX, minY, minZ, maxX, maxY, maxZ, color, type, emissive = 0) {
@@ -251,34 +301,14 @@ function addBox(minX, minY, minZ, maxX, maxY, maxZ, color, type, emissive = 0) {
   boxes.push({ min, max, type, mesh });
 }
 
-// ============================== THREE SETUP ==============================
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0d14);
-scene.fog = new THREE.FogExp2(0x0b0d14, 0.045);
-
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
-
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-
-const hemi = new THREE.HemisphereLight(0xaaaaaa, 0x222222, 0.7);
-scene.add(hemi);
-
-const sun = new THREE.DirectionalLight(0xffffff, 0.9);
-sun.position.set(12, 20, 8);
-sun.castShadow = true;
-scene.add(sun);
-
-// ============================== ПОСТРОЙКА УРОВНЯ ==============================
 const START_POS = new THREE.Vector3(-14, 0.8, 0);
 
-// Пол (камни храма) с ямой в центре
+// Пол
 addBox(-40, 0, -40, -9, 0.05, 40, 0x6e6e72, 'floor');
 addBox(9, 0, -40, 40, 0.05, 40, 0x6e6e72, 'floor');
 addBox(-9, 0, -40, 9, 0.05, -10, 0x6e6e72, 'floor');
 addBox(-9, 0, 10, 9, 0.05, 40, 0x6e6e72, 'floor');
-// Яма (смерть при падении)
+// Яма
 addBox(-9, -0.05, -10, 9, 0.05, 10, 0x141018, 'pit');
 
 // Внешние стены
@@ -296,14 +326,12 @@ addBox(26, 0.05, -30, 30, 6, -26, 0x8c7d68, 'wall');
 addBox(-30, 0.05, 26, -26, 6, 30, 0x8c7d68, 'wall');
 addBox(26, 0.05, 26, 30, 6, 30, 0x8c7d68, 'wall');
 
-// Возвышенная платформа с лестницей (артефакт на ней)
+// Платформы с лестницами
 addBox(10, 0, -22, 32, 3, -8, 0x9a8a72, 'platform');
-// лестница: ступеньки
 for (let i = 0; i < 5; i++) {
   const h = (i + 1) * 0.6;
   addBox(10, h - 0.6, -22 + i * 4.8, 32, h, -22 + (i + 1) * 4.8, 0x9a8a72, 'stairs');
 }
-// вторая платформа поодаль
 addBox(-30, 0, 14, -10, 2.4, 34, 0x9a8a72, 'platform');
 for (let i = 0; i < 4; i++) {
   const h = (i + 1) * 0.6;
@@ -316,18 +344,6 @@ const vel = new THREE.Vector3();
 let grounded = false;
 let onArtifactCooldown = 0;
 
-// -------------------- ЧЕКПОИНТЫ --------------------
-const checkpoints = [];
-let lastCheckpointPos = null;
-
-// -------------------- ЛОВУШКИ --------------------
-const spikes = [];   // {mesh, pos, damageZone: radius}
-const fallPlates = []; // {mesh, baseY, state:'idle'|'falling'|'resetting', timer, playersOn: Set}
-
-// -------------------- ГОЛОВОЛОМКИ --------------------
-const levers = [];      // {mesh, active, target: {type:'door', mesh, openY}}
-const movingPlatforms = []; // {mesh, p0, p1, speed, t, dir:1}
-
 const playerGroup = new THREE.Group();
 scene.add(playerGroup);
 
@@ -335,10 +351,7 @@ const skinMat = new THREE.MeshStandardMaterial({ color: 0x3d2a1f });
 const clothMat = new THREE.MeshStandardMaterial({ color: 0x355040 });
 const hairMat = new THREE.MeshStandardMaterial({ color: 0x1a1410 });
 
-const torso = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.26, 0.26, 0.85, 16),
-  clothMat
-);
+const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.85, 16), clothMat);
 torso.position.y = 0.45;
 const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 16, 16), skinMat);
 head.position.y = 1.02;
@@ -372,11 +385,14 @@ function addArtifact(x, y, z) {
   artifacts.push({ mesh, baseY: y, collected: false });
 }
 
-addArtifact(21, 3.2, -15); // на платформе 1
-addArtifact(-20, 2.6, 24); // на платформе 2
-addArtifact(-14, 0.4, 30); // в углу уровня
+addArtifact(21, 3.2, -15);
+addArtifact(-20, 2.6, 24);
+addArtifact(-14, 0.4, 30);
 
-// -------------------- ЧЕКПОИНТЫ --------------------
+// ============================== ЧЕКПОИНТЫ ==============================
+const checkpoints = [];
+let lastCheckpointPos = null;
+
 function addCheckpoint(x, y, z) {
   const group = new THREE.Group();
   const pole = new THREE.Mesh(
@@ -400,11 +416,13 @@ function addCheckpoint(x, y, z) {
   checkpoints.push({ group, flag, light, pos: new THREE.Vector3(x, y + 2, z), active: false });
 }
 
-addCheckpoint(-14, 0, 3);  // стартовый чекпоинт у входа
-addCheckpoint(21, 3, -15); // около первого артефакта
-addCheckpoint(-20, 2.5, 24); // около второго артефакта
+addCheckpoint(-14, 0, 3);
+addCheckpoint(21, 3, -15);
+addCheckpoint(-20, 2.5, 24);
 
-// -------------------- ШИПЫ --------------------
+// ============================== ШИПЫ ==============================
+const spikes = [];
+
 function addSpikes(x, y, z, count = 5, spacing = 1.2) {
   const root = new THREE.Group();
   for (let i = 0; i < count; i++) {
@@ -413,7 +431,11 @@ function addSpikes(x, y, z, count = 5, spacing = 1.2) {
       new THREE.MeshStandardMaterial({ color: 0xaa1111, emissive: 0x330000 })
     );
     spike.rotation.x = -Math.PI / 2;
-    spike.position.set(i * spacing - ((count - 1) * spacing) / 2, y + 0.3, z);
+    spike.position.set(
+      i * spacing - ((count - 1) * spacing) / 2,
+      y + 0.3,
+      z
+    );
     root.add(spike);
     spikes.push({ mesh: spike, pos: spike.position.clone(), radius: 0.28 });
   }
@@ -421,11 +443,12 @@ function addSpikes(x, y, z, count = 5, spacing = 1.2) {
   scene.add(root);
 }
 
-// ряд шипов перед первой платформой
 addSpikes(10, 0, -12, 6, 1.0);
 addSpikes(-30, 0, 22, 5, 1.0);
 
-// -------------------- ПАДАЮЩИЕ ПЛИТЫ --------------------
+// ============================== ПАДАЮЩИЕ ПЛИТЫ ==============================
+const fallPlates = [];
+
 function addFallPlate(x, y, z, sx, sz, fallDelay = 0.8, resetTime = 3.0) {
   const geo = new THREE.BoxGeometry(sx, 0.4, sz);
   const mat = new THREE.MeshStandardMaterial({ color: 0x6e6e72, roughness: 0.9 });
@@ -435,11 +458,16 @@ function addFallPlate(x, y, z, sx, sz, fallDelay = 0.8, resetTime = 3.0) {
   mesh.receiveShadow = true;
   scene.add(mesh);
 
-  const box = { min: new THREE.Vector3(x - sx / 2, y, z - sz / 2), max: new THREE.Vector3(x + sx / 2, y + 0.4, z + sz / 2) };
+  const box = {
+    min: new THREE.Vector3(x - sx / 2, y, z - sz / 2),
+    max: new THREE.Vector3(x + sx / 2, y + 0.4, z + sz / 2),
+  };
   boxes.push({ min: box.min, max: box.max, type: 'platform', mesh });
 
   fallPlates.push({
-    mesh, baseY: y, box,
+    mesh,
+    baseY: y,
+    box,
     state: 'idle',
     timer: 0,
     fallDelay,
@@ -448,10 +476,11 @@ function addFallPlate(x, y, z, sx, sz, fallDelay = 0.8, resetTime = 3.0) {
   });
 }
 
-// плита над ямой у входа к первой платформе
 addFallPlate(0, 3, -15, 3, 3, 0.7, 3.5);
 
-// -------------------- РЫЧАГИ / КНОПКИ --------------------
+// ============================== РЫЧАГИ ==============================
+const levers = [];
+
 function addLever(x, y, z, targetMesh, openOffset) {
   const root = new THREE.Group();
   const base = new THREE.Mesh(
@@ -476,7 +505,6 @@ function addLever(x, y, z, targetMesh, openOffset) {
   });
 }
 
-// рычаг, открывающий дверь (перемещает стену вниз)
 const doorMesh = new THREE.Mesh(
   new THREE.BoxGeometry(6, 4, 0.4),
   new THREE.MeshStandardMaterial({ color: 0x7a5a3a })
@@ -485,11 +513,19 @@ doorMesh.position.set(-2, 2, -20);
 doorMesh.castShadow = true;
 doorMesh.receiveShadow = true;
 scene.add(doorMesh);
-boxes.push({ min: new THREE.Vector3(-5, 0, -20.2), max: new THREE.Vector3(1, 4, -19.8), type: 'wall', mesh: doorMesh });
+boxes.push({
+  min: new THREE.Vector3(-5, 0, -20.2),
+  max: new THREE.Vector3(1, 4, -19.8),
+  type: 'wall',
+  mesh: doorMesh,
+});
 
 addLever(-8, 0, -22, doorMesh, -5);
 
-// -------------------- ПОДВИЖНЫЕ ПЛАТФОРМЫ --------------------
+// ============================== ПОДВИЖНЫЕ ПЛАТФОРМЫ ==============================
+const movingPlatforms = [];
+let standingOnPlatform = null;
+
 function addMovingPlatform(x, y, z, sx, sy, sz, x1, z1, speed) {
   const geo = new THREE.BoxGeometry(sx, sy, sz);
   const mat = new THREE.MeshStandardMaterial({ color: 0x9a8a72, roughness: 0.8 });
@@ -516,10 +552,9 @@ function addMovingPlatform(x, y, z, sx, sy, sz, x1, z1, speed) {
   });
 }
 
-// платформа, ведущая к артефакту на второй платформе
 addMovingPlatform(-24, 1.2, 8, 4, 0.4, 4, -24, 28, 0.5);
 
-// ============================== ФИЗИКА (сфера против боксов) ==============================
+// ============================== ФИЗИКА ==============================
 const sphereCenter = new THREE.Vector3();
 
 function collideSphereBox(center, radius, box) {
@@ -535,46 +570,27 @@ function collideSphereBox(center, radius, box) {
   return { hit: false };
 }
 
-// вертикальная проекция: какая коробка находится прямо под сферой (опора)
-function supportBox(center) {
-  for (const box of boxes) {
-    if (
-      center.x >= box.min.x &&
-      center.x <= box.max.x &&
-      center.z >= box.min.z &&
-      center.z <= box.max.z
-    ) {
-      const top = box.max.y;
-      const d = center.y - top; // центр сферы над верхней гранью
-      if (d > -0.02 && d <= CFG.playerRadius + 0.08) return { box, d };
-    }
-  }
-  return null;
-}
-
 function resolveHorizontal() {
-  sphereCenter.set(pos.x, CFG.playerRadius, pos.z); // упрощённо: проверяем по высоте талии
-  sphereCenter.y = pos.y + CFG.playerRadius;
-
-  let slides = [];
+  sphereCenter.set(pos.x, pos.y + CFG.playerRadius, pos.z);
   for (let iter = 0; iter < 3; iter++) {
     let moved = false;
     for (const box of boxes) {
       if (box.type === 'pit') continue;
       const hit = collideSphereBox(sphereCenter, CFG.playerRadius, box);
       if (!hit) continue;
-      // ступенька: если коробка выше ног не более stepHeight — поднимаемся
-      if (vel.y <= 0 && box.max.y > pos.y && box.max.y - pos.y <= CFG.stepHeight + 0.05) {
+      if (
+        vel.y <= 0 &&
+        box.max.y > pos.y &&
+        box.max.y - pos.y <= CFG.stepHeight + 0.05
+      ) {
         pos.y = box.max.y;
         sphereCenter.y = pos.y + CFG.playerRadius;
         continue;
       }
-      // отталкивание по нормали
       pos.x += hit.normal.x * hit.depth;
       pos.z += hit.normal.z * hit.depth;
       sphereCenter.x = pos.x;
       sphereCenter.z = pos.z;
-      // скольжение: убираем нормальную компоненту скорости
       const dot = vel.x * hit.normal.x + vel.z * hit.normal.z;
       if (dot < 0) {
         vel.x -= hit.normal.x * dot;
@@ -601,16 +617,15 @@ function resolveVertical() {
     const bottom = box.min.y;
     const centerY = pos.y + CFG.playerRadius;
 
-    // описание сверху (голова упирается в низ коробки)
     if (distH < CFG.playerRadius && centerY < bottom && centerY + vel.y * 0.02 > bottom) {
       pos.y = bottom - CFG.playerRadius;
       vel.y = Math.min(vel.y, 0);
     }
-    // опора снизу
     if (distH < CFG.playerRadius + 0.02) {
       const d = centerY - top;
       if (d > -0.05 && d <= CFG.playerRadius + 0.12) {
-        if (!hitGround || top > hitGround.box.max.y) hitGround = { box, d, top };
+        if (!hitGround || top > hitGround.box.max.y)
+          hitGround = { box, d, top };
       }
     }
   }
@@ -618,7 +633,6 @@ function resolveVertical() {
   if (hitGround) {
     if (!grounded) {
       grounded = true;
-      // поставить ноги ровно на грань
       pos.y = hitGround.top - CFG.playerRadius;
     }
     if (vel.y < 0) vel.y = 0;
@@ -644,7 +658,6 @@ function showMsg(text, ms) {
 
 // ============================== КАМЕРА ==============================
 function segmentBoxHit(p1, p2, box) {
-  // slab-метод для отрезка p1->p2
   let tMin = 0,
     tMax = 1;
   const d = new THREE.Vector3().subVectors(p2, p1);
@@ -692,26 +705,30 @@ function updateCamera() {
   camera.lookAt(look);
 }
 
-// ============================== УПРАВЛЕНИЕ / ОБНОВЛЕНИЕ ==============================
+// ============================== ИГРОВОЙ ЦИКЛ ==============================
 let lastStepTime = 0;
 
-let standingOnPlatform = null;
-
 function updateGame(dt) {
-  if (!pointerLocked.value) return;
+  if (!gameStarted) return;
 
   const now = performance.now() * 0.001;
-
   standingOnPlatform = null;
 
-  // обновляем подвижные платформы
+  // подвижные платформы
   for (const mp of movingPlatforms) {
     mp.t += mp.dir * mp.speed * dt;
-    if (mp.t > 1) { mp.t = 1; mp.dir = -1; }
-    if (mp.t < 0) { mp.t = 0; mp.dir = 1; }
+    if (mp.t > 1) {
+      mp.t = 1;
+      mp.dir = -1;
+    }
+    if (mp.t < 0) {
+      mp.t = 0;
+      mp.dir = 1;
+    }
     const lerp = new THREE.Vector3().lerpVectors(mp.p0, mp.p1, mp.t);
     mp.mesh.position.copy(lerp);
-    const hx = 2, hz = 2;
+    const hx = 2,
+      hz = 2;
     mp.box.min.set(lerp.x - hx, lerp.y, lerp.z - hz);
     mp.box.max.set(lerp.x + hx, lerp.y + 0.4, lerp.z + hz);
   }
@@ -726,6 +743,7 @@ function updateGame(dt) {
       targetVel = jv.normalize().multiplyScalar(s);
     }
   }
+
   const acc = grounded ? CFG.accel : CFG.airAccel;
   vel.x += (targetVel.x - vel.x) * Math.min(1, acc * dt);
   vel.z += (targetVel.z - vel.z) * Math.min(1, acc * dt);
@@ -740,7 +758,11 @@ function updateGame(dt) {
 
   // перенос игрока вместе с подвижной платформой
   if (standingOnPlatform && standingOnPlatform.mesh) {
-    const platMove = new THREE.Vector3().subVectors(standingOnPlatform.mesh.position, standingOnPlatform._lastPos || standingOnPlatform.mesh.position.clone());
+    const last = standingOnPlatform._lastPos || standingOnPlatform.mesh.position.clone();
+    const platMove = new THREE.Vector3().subVectors(
+      standingOnPlatform.mesh.position,
+      last
+    );
     standingOnPlatform._lastPos = standingOnPlatform.mesh.position.clone();
     if (grounded) {
       pos.x += platMove.x;
@@ -754,7 +776,7 @@ function updateGame(dt) {
     audio.playJump();
   }
 
-  // шаги при движении по поверхности
+  // шаги
   if (grounded && (Math.abs(vel.x) > 0.05 || Math.abs(vel.z) > 0.05)) {
     const stepInterval = (keys['ShiftLeft'] || keys['ShiftRight'] || joyActive) ? 0.3 : 0.45;
     if (now - lastStepTime > stepInterval) {
@@ -783,7 +805,7 @@ function updateGame(dt) {
     }
   }
 
-  // -------------------- ЧЕКПОИНТЫ --------------------
+  // чекпоинты
   for (const cp of checkpoints) {
     if (cp.active) continue;
     const d = pos.distanceTo(cp.pos);
@@ -798,7 +820,7 @@ function updateGame(dt) {
     }
   }
 
-  // -------------------- ШИПЫ --------------------
+  // шипы
   for (const sp of spikes) {
     if (pos.distanceTo(sp.pos) < sp.radius + CFG.playerRadius) {
       respawn();
@@ -806,29 +828,27 @@ function updateGame(dt) {
     }
   }
 
-  // -------------------- ПАДАЮЩИЕ ПЛИТЫ --------------------
+  // падающие плиты
   for (const fp of fallPlates) {
     const onPlate =
-      pos.x >= fp.box.min.x && pos.x <= fp.box.max.x &&
-      pos.z >= fp.box.min.z && pos.z <= fp.box.max.z &&
-      pos.y < fp.box.max.y + 0.6 && pos.y > fp.box.min.y - 0.6;
-    if (onPlate) {
-      fp.playersOn.add('player');
-    } else {
-      fp.playersOn.delete('player');
-    }
+      pos.x >= fp.box.min.x &&
+      pos.x <= fp.box.max.x &&
+      pos.z >= fp.box.min.z &&
+      pos.z <= fp.box.max.z &&
+      pos.y < fp.box.max.y + 0.6 &&
+      pos.y > fp.box.min.y - 0.6;
+    if (onPlate) fp.playersOn.add('player');
+    else fp.playersOn.delete('player');
+
     if (fp.state === 'idle' && fp.playersOn.size > 0) {
       fp.state = 'falling';
       fp.timer = 0;
     }
     if (fp.state === 'falling') {
       fp.timer += dt;
-      fp.mesh.position.y = fp.baseY - Math.min(fp.timer * 8, 12);
+      fp.mesh.position.y = fp.baseY - Math.min(fp.timer * 8, 13);
       fp.box.min.y = fp.mesh.position.y;
       fp.box.max.y = fp.mesh.position.y + 0.4;
-      if (fp.timer >= fp.fallDelay && pos.y < fp.mesh.position.y - 2) {
-        // игрок наверняка упадёт в яму
-      }
       if (fp.timer >= fp.fallDelay + 1) {
         fp.state = 'resetting';
         fp.timer = 0;
@@ -844,9 +864,9 @@ function updateGame(dt) {
     }
   }
 
-  // -------------------- РЫЧАГИ --------------------
+  // рычаги
   if (keys['KeyE'] && !onArtifactCooldown) {
-    onArtifactCooldown = 12; // frames-ish cooldown via dt below
+    onArtifactCooldown = 12;
     for (const lv of levers) {
       const d = pos.distanceTo(lv.mesh.position);
       if (d < 2.2 && !lv.active) {
@@ -862,15 +882,17 @@ function updateGame(dt) {
     if (onArtifactCooldown < 0) onArtifactCooldown = 0;
   }
 
-  // открытие двери рычагом
+  // открытие двери
   for (const lv of levers) {
     if (lv.active && lv.target) {
       const cur = lv.target.mesh.position.y;
       const targetY = lv.target.startY + lv.target.openOffset;
       lv.target.mesh.position.y += (targetY - cur) * 0.1;
-      const box = boxes.find(b => b.mesh === lv.target.mesh);
+      const box = boxes.find((b) => b.mesh === lv.target.mesh);
       if (box) {
-        const hx = 3, hz = 0.2, hy = 2;
+        const hx = 3,
+          hz = 0.2,
+          hy = 2;
         const cx = lv.target.mesh.position.x;
         const cy = lv.target.mesh.position.y;
         const cz = lv.target.mesh.position.z;
@@ -897,7 +919,7 @@ function updateGame(dt) {
   updateCamera();
 }
 
-// ============================== АРТЕФАКТЫ: анимация + рендер ==============================
+// ============================== РЕНДЕР ==============================
 let lastTime = 0;
 function animate(t) {
   requestAnimationFrame(animate);
@@ -924,6 +946,6 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// старт
+// старт рендера (игра ждёт startGame())
 lastTime = performance.now();
 requestAnimationFrame(animate);
