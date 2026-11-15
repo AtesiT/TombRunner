@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { audio } from './audio.js';
 
 // ============================== CONFIG ==============================
 const CFG = {
@@ -66,8 +67,13 @@ document.addEventListener('pointerlockchange', () => {
   menuEl.classList.toggle('hidden', pointerLocked.value);
   hudEl.classList.toggle('hidden', !pointerLocked.value);
   updatePointerLockUI();
-  if (!pointerLocked.value) {
+  if (pointerLocked.value) {
+    audio.resume();
+    audio.startMusic();
+  } else {
     for (const k in keys) keys[k] = false;
+    // музыка продолжает играть в меню; если хотите остановить — раскомментируйте:
+    // audio.stopMusic();
   }
 });
 document.addEventListener('pointerlockerror', () => {
@@ -271,6 +277,18 @@ const vel = new THREE.Vector3();
 let grounded = false;
 let onArtifactCooldown = 0;
 
+// -------------------- ЧЕКПОИНТЫ --------------------
+const checkpoints = [];
+let lastCheckpointPos = null;
+
+// -------------------- ЛОВУШКИ --------------------
+const spikes = [];   // {mesh, pos, damageZone: radius}
+const fallPlates = []; // {mesh, baseY, state:'idle'|'falling'|'resetting', timer, playersOn: Set}
+
+// -------------------- ГОЛОВОЛОМКИ --------------------
+const levers = [];      // {mesh, active, target: {type:'door', mesh, openY}}
+const movingPlatforms = []; // {mesh, p0, p1, speed, t, dir:1}
+
 const playerGroup = new THREE.Group();
 scene.add(playerGroup);
 
@@ -318,6 +336,149 @@ function addArtifact(x, y, z) {
 addArtifact(21, 3.2, -15); // на платформе 1
 addArtifact(-20, 2.6, 24); // на платформе 2
 addArtifact(-14, 0.4, 30); // в углу уровня
+
+// -------------------- ЧЕКПОИНТЫ --------------------
+function addCheckpoint(x, y, z) {
+  const group = new THREE.Group();
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, 2, 8),
+    new THREE.MeshStandardMaterial({ color: 0x444444 })
+  );
+  pole.position.y = 1;
+  const flag = new THREE.Mesh(
+    new THREE.BoxGeometry(0.8, 0.5, 0.05),
+    new THREE.MeshStandardMaterial({ color: 0x8b0000 })
+  );
+  flag.position.set(0.45, 2, 0);
+  const light = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 8, 8),
+    new THREE.MeshStandardMaterial({ color: 0x8b0000, emissive: 0x8b0000 })
+  );
+  light.position.set(0.45, 2.3, 0);
+  group.add(pole, flag, light);
+  group.position.set(x, y, z);
+  scene.add(group);
+  checkpoints.push({ group, flag, light, pos: new THREE.Vector3(x, y + 2, z), active: false });
+}
+
+addCheckpoint(-14, 0, 3);  // стартовый чекпоинт у входа
+addCheckpoint(21, 3, -15); // около первого артефакта
+addCheckpoint(-20, 2.5, 24); // около второго артефакта
+
+// -------------------- ШИПЫ --------------------
+function addSpikes(x, y, z, count = 5, spacing = 1.2) {
+  const root = new THREE.Group();
+  for (let i = 0; i < count; i++) {
+    const spike = new THREE.Mesh(
+      new THREE.ConeGeometry(0.12, 0.6, 6),
+      new THREE.MeshStandardMaterial({ color: 0xaa1111, emissive: 0x330000 })
+    );
+    spike.rotation.x = -Math.PI / 2;
+    spike.position.set(i * spacing - ((count - 1) * spacing) / 2, y + 0.3, z);
+    root.add(spike);
+    spikes.push({ mesh: spike, pos: spike.position.clone(), radius: 0.28 });
+  }
+  root.position.set(x, 0, 0);
+  scene.add(root);
+}
+
+// ряд шипов перед первой платформой
+addSpikes(10, 0, -12, 6, 1.0);
+addSpikes(-30, 0, 22, 5, 1.0);
+
+// -------------------- ПАДАЮЩИЕ ПЛИТЫ --------------------
+function addFallPlate(x, y, z, sx, sz, fallDelay = 0.8, resetTime = 3.0) {
+  const geo = new THREE.BoxGeometry(sx, 0.4, sz);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x6e6e72, roughness: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  const box = { min: new THREE.Vector3(x - sx / 2, y, z - sz / 2), max: new THREE.Vector3(x + sx / 2, y + 0.4, z + sz / 2) };
+  boxes.push({ min: box.min, max: box.max, type: 'platform', mesh });
+
+  fallPlates.push({
+    mesh, baseY: y, box,
+    state: 'idle',
+    timer: 0,
+    fallDelay,
+    resetTime,
+    playersOn: new Set(),
+  });
+}
+
+// плита над ямой у входа к первой платформе
+addFallPlate(0, 3, -15, 3, 3, 0.7, 3.5);
+
+// -------------------- РЫЧАГИ / КНОПКИ --------------------
+function addLever(x, y, z, targetMesh, openOffset) {
+  const root = new THREE.Group();
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.1, 0.1, 0.5, 8),
+    new THREE.MeshStandardMaterial({ color: 0x555555 })
+  );
+  base.position.y = 0.25;
+  const handle = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 0.6, 0.08),
+    new THREE.MeshStandardMaterial({ color: 0xcc8800 })
+  );
+  handle.position.y = 0.55;
+  root.add(base, handle);
+  root.position.set(x, y, z);
+  scene.add(root);
+
+  levers.push({
+    mesh: root,
+    active: false,
+    handle,
+    target: { mesh: targetMesh, openOffset, startY: targetMesh.position.y },
+  });
+}
+
+// рычаг, открывающий дверь (перемещает стену вниз)
+const doorMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(6, 4, 0.4),
+  new THREE.MeshStandardMaterial({ color: 0x7a5a3a })
+);
+doorMesh.position.set(-2, 2, -20);
+doorMesh.castShadow = true;
+doorMesh.receiveShadow = true;
+scene.add(doorMesh);
+boxes.push({ min: new THREE.Vector3(-5, 0, -20.2), max: new THREE.Vector3(1, 4, -19.8), type: 'wall', mesh: doorMesh });
+
+addLever(-8, 0, -22, doorMesh, -5);
+
+// -------------------- ПОДВИЖНЫЕ ПЛАТФОРМЫ --------------------
+function addMovingPlatform(x, y, z, sx, sy, sz, x1, z1, speed) {
+  const geo = new THREE.BoxGeometry(sx, sy, sz);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x9a8a72, roughness: 0.8 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  const box = {
+    min: new THREE.Vector3(x - sx / 2, y, z - sz / 2),
+    max: new THREE.Vector3(x + sx / 2, y + sy, z + sz / 2),
+  };
+  boxes.push({ min: box.min, max: box.max, type: 'platform', mesh, moving: true });
+
+  movingPlatforms.push({
+    mesh,
+    p0: new THREE.Vector3(x, y, z),
+    p1: new THREE.Vector3(x1, y, z1),
+    speed,
+    t: 0,
+    dir: 1,
+    box,
+  });
+}
+
+// платформа, ведущая к артефакту на второй платформе
+addMovingPlatform(-24, 1.2, 8, 4, 0.4, 4, -24, 28, 0.5);
 
 // ============================== ФИЗИКА (сфера против боксов) ==============================
 const sphereCenter = new THREE.Vector3();
@@ -422,15 +583,17 @@ function resolveVertical() {
       pos.y = hitGround.top - CFG.playerRadius;
     }
     if (vel.y < 0) vel.y = 0;
+    if (hitGround.box.moving) standingOnPlatform = hitGround.box;
   } else {
     grounded = false;
   }
 }
 
 function respawn() {
-  pos.copy(START_POS);
+  pos.copy(lastCheckpointPos || START_POS);
   vel.set(0, 0, 0);
   grounded = false;
+  audio.playDeath();
   showMsg('Респавн', 1200);
 }
 
@@ -491,8 +654,28 @@ function updateCamera() {
 }
 
 // ============================== УПРАВЛЕНИЕ / ОБНОВЛЕНИЕ ==============================
+let lastStepTime = 0;
+
+let standingOnPlatform = null;
+
 function updateGame(dt) {
   if (!pointerLocked.value) return;
+
+  const now = performance.now() * 0.001;
+
+  standingOnPlatform = null;
+
+  // обновляем подвижные платформы
+  for (const mp of movingPlatforms) {
+    mp.t += mp.dir * mp.speed * dt;
+    if (mp.t > 1) { mp.t = 1; mp.dir = -1; }
+    if (mp.t < 0) { mp.t = 0; mp.dir = 1; }
+    const lerp = new THREE.Vector3().lerpVectors(mp.p0, mp.p1, mp.t);
+    mp.mesh.position.copy(lerp);
+    const hx = 2, hz = 2;
+    mp.box.min.set(lerp.x - hx, lerp.y, lerp.z - hz);
+    mp.box.max.set(lerp.x + hx, lerp.y + 0.4, lerp.z + hz);
+  }
 
   let targetVel = getTargetVelocity();
   if (joyDir.lengthSq() > 0.01) {
@@ -516,9 +699,29 @@ function updateGame(dt) {
   pos.y += vel.y * dt;
   resolveVertical();
 
+  // перенос игрока вместе с подвижной платформой
+  if (standingOnPlatform && standingOnPlatform.mesh) {
+    const platMove = new THREE.Vector3().subVectors(standingOnPlatform.mesh.position, standingOnPlatform._lastPos || standingOnPlatform.mesh.position.clone());
+    standingOnPlatform._lastPos = standingOnPlatform.mesh.position.clone();
+    if (grounded) {
+      pos.x += platMove.x;
+      pos.z += platMove.z;
+    }
+  }
+
   if (grounded && keys['Space']) {
     vel.y = CFG.jumpVelocity;
     grounded = false;
+    audio.playJump();
+  }
+
+  // шаги при движении по поверхности
+  if (grounded && (Math.abs(vel.x) > 0.05 || Math.abs(vel.z) > 0.05)) {
+    const stepInterval = (keys['ShiftLeft'] || keys['ShiftRight'] || joyActive) ? 0.3 : 0.45;
+    if (now - lastStepTime > stepInterval) {
+      audio.playStep();
+      lastStepTime = now;
+    }
   }
 
   if (pos.y < CFG.fallKillY) respawn();
@@ -531,11 +734,109 @@ function updateGame(dt) {
     if (d < 1.1) {
       art.collected = true;
       scene.remove(art.mesh);
+      audio.playArtifact();
       collected++;
       artCountEl.textContent = String(collected);
       showMsg('Артефакт найден!', 1000);
       if (collected >= TOTAL_ARTIFACTS) {
         showMsg('Все артефакты собраны — прототип завершён', 3000);
+      }
+    }
+  }
+
+  // -------------------- ЧЕКПОИНТЫ --------------------
+  for (const cp of checkpoints) {
+    if (cp.active) continue;
+    const d = pos.distanceTo(cp.pos);
+    if (d < 1.6) {
+      cp.active = true;
+      lastCheckpointPos = cp.pos.clone();
+      cp.flag.material.color.set(0x008b00);
+      cp.light.material.color.set(0x00ff00);
+      cp.light.material.emissive.set(0x00ff00);
+      audio.playCheckpoint();
+      showMsg('Чекпоинт активирован', 1200);
+    }
+  }
+
+  // -------------------- ШИПЫ --------------------
+  for (const sp of spikes) {
+    if (pos.distanceTo(sp.pos) < sp.radius + CFG.playerRadius) {
+      respawn();
+      break;
+    }
+  }
+
+  // -------------------- ПАДАЮЩИЕ ПЛИТЫ --------------------
+  for (const fp of fallPlates) {
+    const onPlate =
+      pos.x >= fp.box.min.x && pos.x <= fp.box.max.x &&
+      pos.z >= fp.box.min.z && pos.z <= fp.box.max.z &&
+      pos.y < fp.box.max.y + 0.6 && pos.y > fp.box.min.y - 0.6;
+    if (onPlate) {
+      fp.playersOn.add('player');
+    } else {
+      fp.playersOn.delete('player');
+    }
+    if (fp.state === 'idle' && fp.playersOn.size > 0) {
+      fp.state = 'falling';
+      fp.timer = 0;
+    }
+    if (fp.state === 'falling') {
+      fp.timer += dt;
+      fp.mesh.position.y = fp.baseY - Math.min(fp.timer * 8, 12);
+      fp.box.min.y = fp.mesh.position.y;
+      fp.box.max.y = fp.mesh.position.y + 0.4;
+      if (fp.timer >= fp.fallDelay && pos.y < fp.mesh.position.y - 2) {
+        // игрок наверняка упадёт в яму
+      }
+      if (fp.timer >= fp.fallDelay + 1) {
+        fp.state = 'resetting';
+        fp.timer = 0;
+      }
+    }
+    if (fp.state === 'resetting') {
+      fp.timer += dt;
+      const t = Math.min(fp.timer / fp.resetTime, 1);
+      fp.mesh.position.y = fp.baseY - 13 * (1 - t);
+      fp.box.min.y = fp.mesh.position.y;
+      fp.box.max.y = fp.mesh.position.y + 0.4;
+      if (t >= 1) fp.state = 'idle';
+    }
+  }
+
+  // -------------------- РЫЧАГИ --------------------
+  if (keys['KeyE'] && !onArtifactCooldown) {
+    onArtifactCooldown = 12; // frames-ish cooldown via dt below
+    for (const lv of levers) {
+      const d = pos.distanceTo(lv.mesh.position);
+      if (d < 2.2 && !lv.active) {
+        lv.active = true;
+        lv.handle.position.y = 0.15;
+        audio.playLever();
+        showMsg('Механизм активирован', 1200);
+      }
+    }
+  }
+  if (onArtifactCooldown > 0) {
+    onArtifactCooldown -= dt * 30;
+    if (onArtifactCooldown < 0) onArtifactCooldown = 0;
+  }
+
+  // открытие двери рычагом
+  for (const lv of levers) {
+    if (lv.active && lv.target) {
+      const cur = lv.target.mesh.position.y;
+      const targetY = lv.target.startY + lv.target.openOffset;
+      lv.target.mesh.position.y += (targetY - cur) * 0.1;
+      const box = boxes.find(b => b.mesh === lv.target.mesh);
+      if (box) {
+        const hx = 3, hz = 0.2, hy = 2;
+        const cx = lv.target.mesh.position.x;
+        const cy = lv.target.mesh.position.y;
+        const cz = lv.target.mesh.position.z;
+        box.min.set(cx - hx, cy - hy, cz - hz);
+        box.max.set(cx + hx, cy + hy, cz + hz);
       }
     }
   }
